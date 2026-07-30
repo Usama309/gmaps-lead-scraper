@@ -46,8 +46,15 @@ export const CONFIG = deepFreeze({
     validPrefix: ")]}'",
     blockedStatuses: [302, 429, 403, 503],
     latencyEwmaAlpha: 0.3,
-    // Pause if smoothed latency exceeds this multiple of the first observed latency.
+    // Pause if smoothed latency exceeds this multiple of the baseline.
     latencyBreachMultiple: 4,
+    // The baseline is the median of this many opening samples, not the first one.
+    // A single unlucky slow request used to set it permanently and silently
+    // disable the entire pressure signal.
+    baselineSamples: 5,
+    // An absolute ceiling, so a high baseline cannot switch detection off
+    // altogether. Recon saw 980 ms normally and 2.2 s under burst.
+    absoluteLatencyCeilingMs: 15000,
   },
 
   enrich: {

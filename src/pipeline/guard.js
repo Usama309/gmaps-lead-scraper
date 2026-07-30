@@ -14,6 +14,12 @@ export function classifyTransport({ status, body }) {
   if (!body) {
     return { state: 'blocked', reason: 'empty response body' };
   }
+  // A non-text body (a Buffer from a Node HTTP path, an object, a number) must
+  // classify rather than throw. A guard that throws escapes the state machine it
+  // exists to enforce, and the caller has no state to act on.
+  if (typeof body !== 'string') {
+    return { state: 'blocked', reason: `response body was ${typeof body}, not text` };
+  }
   if (!body.startsWith(CONFIG.guard.validPrefix)) {
     return { state: 'blocked', reason: 'response is missing the payload prefix, likely a challenge page' };
   }
@@ -29,7 +35,24 @@ export function classifyTransport({ status, body }) {
  * Treating a real block as end-of-list would silently truncate results and the
  * operator would never know the list was incomplete.
  */
-export function classifyPage({ transport, recordCount, rawCount = 0 }) {
+export function classifyPage({ transport, recordCount, rawCount }) {
+  // Both counts are REQUIRED and validated, deliberately. rawCount previously
+  // defaulted to 0, which meant a caller forgetting to pass it turned a drift
+  // straight back into end_of_list: the exact silent truncation this module
+  // exists to prevent, reintroduced by one omitted argument. Only the caller
+  // knows whether records arrived, so absence is a bug and must be loud.
+  for (const [name, value] of [['recordCount', recordCount], ['rawCount', rawCount]]) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`classifyPage requires a non-negative integer ${name}, got ${JSON.stringify(value)}`);
+    }
+  }
+  if (recordCount > rawCount) {
+    throw new Error(
+      `classifyPage got recordCount ${recordCount} above rawCount ${rawCount}, `
+      + 'which cannot happen: extraction can only ever lose records, never invent them'
+    );
+  }
+
   if (transport.state === 'blocked') {
     return { state: 'blocked', reason: transport.reason };
   }
@@ -62,20 +85,38 @@ export function nextDelayMs(random = Math.random) {
  * available warning that we are pushing too hard, well before a hard block.
  */
 export function createLatencyWatch() {
-  const { latencyEwmaAlpha, latencyBreachMultiple } = CONFIG.guard;
-  let ewma = null;
+  const {
+    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
+  } = CONFIG.guard;
+
+  const warmup = [];
   let baseline = null;
+  let ewma = null;
 
   return {
     /** Returns true when smoothed latency has breached the threshold. */
     observe(ms) {
+      // A non-positive or non-finite reading is a broken measurement, not a fast
+      // response. Admitting one poisons the baseline and every later comparison:
+      // a single 0 made the next request look infinitely slower, and a negative
+      // value produced an instant false breach.
+      if (!Number.isFinite(ms) || ms <= 0) return false;
+
+      ewma = ewma === null ? ms : latencyEwmaAlpha * ms + (1 - latencyEwmaAlpha) * ewma;
+
       if (baseline === null) {
-        baseline = ms;
-        ewma = ms;
-        return false;
+        warmup.push(ms);
+        if (warmup.length < baselineSamples) return false;
+        // Median of the opening samples, not the first one. A single unlucky slow
+        // request used to become the permanent baseline, after which nothing could
+        // ever breach and the pressure signal was silently dead.
+        const sorted = [...warmup].sort((a, b) => a - b);
+        baseline = sorted[Math.floor(sorted.length / 2)];
       }
-      ewma = latencyEwmaAlpha * ms + (1 - latencyEwmaAlpha) * ewma;
-      return ewma > baseline * latencyBreachMultiple;
+
+      // The absolute ceiling means a legitimately high baseline cannot switch
+      // detection off altogether.
+      return ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
     },
   };
 }
