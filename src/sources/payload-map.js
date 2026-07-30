@@ -175,6 +175,11 @@ export const CANARY_RULES = Object.freeze({
   // Two mapped fields holding the same value on more than a quarter of records
   // means the indices collided. Genuine data essentially never does this.
   maxFieldCollisionRatio: 0.25,
+  // The fraction of records whose reviewCount must be at least their rating. Two
+  // numeric fields can swap while both stay individually valid, and only the
+  // ordering between them gives that away. Set below 1 so a genuinely tiny
+  // business, four reviews against a 4.0 rating, does not trip it.
+  minOrderedRatio: 0.9,
   // A record's coordinates should sit near the point we queried. A lat/lng swap
   // passes both range checks whenever |longitude| is under 90, which covers most
   // of the inhabited world, so range validation alone cannot catch it.
@@ -347,7 +352,7 @@ export function runCanary(parsed, expect = {}) {
 
   if (paired.length > 0) {
     const ordered = paired.filter((v) => v.reviewCount >= v.rating);
-    if (ordered.length < paired.length * 0.9) {
+    if (ordered.length < paired.length * CANARY_RULES.minOrderedRatio) {
       problems.push(
         `reviewCount is smaller than rating on ${paired.length - ordered.length} of `
         + `${paired.length} records. Real businesses have more reviews than their `

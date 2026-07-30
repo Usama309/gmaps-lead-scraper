@@ -368,6 +368,24 @@ test('a phone number is rejected in the placeId slot and vice versa', () => {
   assert.equal(runCanary(placeIdAsPhone).ok, false, 'a place ID must not pass as a phone');
 });
 
+test('every canary threshold is a named number on CANARY_RULES, never an inline literal', () => {
+  // All tunables belong in one place. The ordering invariant's ratio was briefly
+  // written inline as `paired.length * 0.9` while every sibling threshold was
+  // named, so this asserts the whole set rather than merely noting the drift.
+  const thresholds = [
+    'minRecordsToJudgeCoverage',
+    'minRecordsToRequireAnyValid',
+    'minRecordsNearQuery',
+    'maxFieldCollisionRatio',
+    'minOrderedRatio',
+    'maxDistanceFromQueryKm',
+  ];
+  for (const key of thresholds) {
+    assert.equal(typeof CANARY_RULES[key], 'number', `${key} must be a named number`);
+    assert.ok(CANARY_RULES[key] > 0, `${key} must be positive`);
+  }
+});
+
 test('CANARY_RULES marks name and cid as required, since they are the record identity', () => {
   const required = CANARY_RULES.fields.filter((f) => f.required).map((f) => f.field);
   assert.deepEqual(required.sort(), ['cid', 'name']);
