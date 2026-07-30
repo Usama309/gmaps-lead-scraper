@@ -384,6 +384,12 @@ test('the tiling threshold is absolute so the single-tile path can actually fire
   assert.ok(CONFIG.tiling.minRadiusForTilingKm > 0);
 });
 
+test('tile spacing is an absolute distance, not a fraction of the radius', () => {
+  assert.ok(CONFIG.tiling.spacingKm > 0);
+  assert.equal(CONFIG.tiling.spacingFactor, undefined,
+    'a proportional spacing factor cancels the radius out and pins the grid size');
+});
+
 test('guard knows the valid payload prefix', () => {
   assert.equal(CONFIG.guard.validPrefix, ")]}'");
 });
@@ -428,13 +434,22 @@ export const CONFIG = deepFreeze({
   },
 
   tiling: {
-    // Tile spacing as a fraction of the requested radius. 0.6 gives overlapping
-    // coverage so businesses near a tile edge are not missed.
-    spacingFactor: 0.6,
+    // Absolute distance between tile centres. This must NOT be a fraction of the
+    // requested radius: ceil(radius / (radius * factor)) cancels the radius out,
+    // pinning the grid to a constant size and making query density fall as
+    // 1/radius^2. A query's real catch-area depends on business density around
+    // the query point, not on how wide the operator drew the circle, so the
+    // spacing that matters is absolute.
+    // 6 km chosen against the UI's own 15 km default radius: it yields 21 tiles,
+    // comfortably under maxTiles, so the common case never truncates. Tighter
+    // spacing (3 km) tripled the query count for heavily overlapping coverage and
+    // truncated the default search down to about 8 km.
+    spacingKm: 6,
+    // Hard ceiling on queries per run. Reaching it means the requested radius was
+    // larger than maxTiles can cover, which is reported to the operator rather
+    // than silently truncating coverage.
     maxTiles: 25,
-    // Below this radius, one query already covers the area. Must be an absolute
-    // distance: comparing the radius against a fraction of itself is a condition
-    // that can never be true.
+    // Below this radius one query already covers the area, so skip tiling.
     minRadiusForTilingKm: 5,
   },
 
@@ -1563,7 +1578,7 @@ git commit -m "feat: add pure filter pipeline covering all 21 filters"
 
 **Interfaces:**
 - Consumes: `CONFIG` from `src/core/config.js`.
-- Produces: `tileRadius({ lat, lng, radiusKm }) -> [{ lat, lng }]`, `haversineKm(a, b) -> number`
+- Produces: `planTiles({ lat, lng, radiusKm }) -> { tiles, truncated, candidateCount, requestedRadiusKm, effectiveRadiusKm }`, `tileRadius(args) -> [{ lat, lng }]` (thin wrapper), `haversineKm(a, b) -> number`
 
 **Why this task exists:** a single Google query is hard-capped at 247 results. The only way to harvest more from one area is to run the same keyword at several sub-centres and merge on the dedupe key.
 
@@ -1574,7 +1589,7 @@ Create `tests/tiling.test.js`:
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tileRadius, haversineKm } from '../src/pipeline/tiling.js';
+import { planTiles, tileRadius, haversineKm } from '../src/pipeline/tiling.js';
 import { CONFIG } from '../src/core/config.js';
 
 const ATTOCK = { lat: 33.7609824, lng: 72.342874 };
@@ -1584,7 +1599,7 @@ test('haversineKm returns zero for identical points', () => {
 });
 
 test('haversineKm matches a known distance within one percent', () => {
-  // Attock to Islamabad is roughly 77 km.
+  // Attock to Islamabad measures about 66 km great-circle.
   const islamabad = { lat: 33.6844, lng: 73.0479 };
   const d = haversineKm(ATTOCK, islamabad);
   assert.ok(d > 63 && d < 68, `unexpected distance: ${d}`);
@@ -1623,7 +1638,7 @@ test('every tile lies inside the requested radius', () => {
 test('tiles overlap enough to cover the gaps between them', () => {
   const radiusKm = 30;
   const tiles = tileRadius({ ...ATTOCK, radiusKm });
-  const spacing = radiusKm * CONFIG.tiling.spacingFactor;
+  const spacing = CONFIG.tiling.spacingKm;
   // Nearest-neighbour distance must not exceed the spacing, or coverage has holes.
   for (const a of tiles) {
     const nearest = Math.min(...tiles.filter((b) => b !== a).map((b) => haversineKm(a, b)));
@@ -1631,14 +1646,35 @@ test('tiles overlap enough to cover the gaps between them', () => {
   }
 });
 
-test('tile count is capped so a huge radius cannot produce a runaway job', () => {
-  const tiles = tileRadius({ ...ATTOCK, radiusKm: 500 });
-  assert.ok(tiles.length <= CONFIG.tiling.maxTiles, `${tiles.length} exceeds the cap`);
+test('tile count grows with radius, so coverage density does not collapse', () => {
+  // Guards the bug this module shipped with once: spacing as a fraction of the
+  // radius cancels the radius out, pinning the grid to 9 tiles at every scale.
+  const small = planTiles({ ...ATTOCK, radiusKm: 8 }).candidateCount;
+  const medium = planTiles({ ...ATTOCK, radiusKm: 20 }).candidateCount;
+  const large = planTiles({ ...ATTOCK, radiusKm: 40 }).candidateCount;
+  assert.ok(medium > small, `medium ${medium} must exceed small ${small}`);
+  assert.ok(large > medium, `large ${large} must exceed medium ${medium}`);
+});
+
+test('the tile cap actually engages and is reported, never silent', () => {
+  const plan = planTiles({ ...ATTOCK, radiusKm: 500 });
+  assert.equal(plan.tiles.length, CONFIG.tiling.maxTiles, 'the cap must bind');
+  assert.ok(plan.candidateCount > CONFIG.tiling.maxTiles, 'the cap must have something to cut');
+  assert.equal(plan.truncated, true, 'truncation must be reported');
+  assert.ok(plan.effectiveRadiusKm < plan.requestedRadiusKm,
+    'a truncated plan covers less than was asked for and must say so');
+});
+
+test('an untruncated plan reports its full radius as effective', () => {
+  const plan = planTiles({ ...ATTOCK, radiusKm: 8 });
+  assert.equal(plan.truncated, false);
+  assert.equal(plan.effectiveRadiusKm, plan.requestedRadiusKm);
 });
 
 test('tiling throws on invalid coordinates rather than emitting nonsense', () => {
   assert.throws(() => tileRadius({ lat: null, lng: 72, radiusKm: 10 }), /coordinates/i);
   assert.throws(() => tileRadius({ lat: 33, lng: 72, radiusKm: 0 }), /radius/i);
+  assert.throws(() => tileRadius({ lat: 33, lng: 72, radiusKm: -5 }), /radius/i);
 });
 ```
 
@@ -1670,48 +1706,77 @@ export function haversineKm(a, b) {
 }
 
 /**
- * Split a circular search area into a square grid of sub-centres.
+ * Plan the sub-centres for a circular search area.
  *
- * Spacing is a fraction of the radius so neighbouring tiles overlap, which
- * matters because Google ranks by relevance to the query point and a business
- * sitting between two tile centres would otherwise fall through the gap.
+ * A single Google query is hard-capped at 247 results, so covering a real market
+ * means firing the same keyword at several centres and merging on the dedupe key.
+ * Tiles overlap deliberately: Google ranks by relevance to the query point, so a
+ * business sitting between two centres would otherwise fall through the gap.
  *
- * Tiles outside the circle are discarded, so the returned set is a disc, not a square.
+ * Spacing is ABSOLUTE. An earlier version spaced tiles at a fraction of the
+ * requested radius, which cancels the radius out of ceil(radius / spacing) and
+ * pins the grid to a constant 9 tiles at every scale, so a 30 km search fired
+ * exactly as many queries as a 6 km one and coverage density fell as 1/radius^2.
+ *
+ * Returns coverage metadata alongside the tiles, because hitting maxTiles shrinks
+ * the area actually searched and the operator has to be told rather than handed a
+ * short list that looks complete.
  */
-export function tileRadius({ lat, lng, radiusKm }) {
+export function planTiles({ lat, lng, radiusKm }) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    throw new Error('tileRadius requires finite coordinates');
+    throw new Error('planTiles requires finite coordinates');
   }
   if (!Number.isFinite(radiusKm) || radiusKm <= 0) {
-    throw new Error('tileRadius requires a positive radius');
+    throw new Error('planTiles requires a positive radius');
   }
 
   const centre = { lat, lng };
-  const spacingKm = radiusKm * CONFIG.tiling.spacingFactor;
 
-  // A small area needs no tiling: one query already covers it, and firing nine
-  // redundant queries would spend rate-limit budget for no extra results.
-  // Compared against an absolute threshold, never against a fraction of the
-  // radius itself, which would be a condition that can never be true.
-  if (radiusKm <= CONFIG.tiling.minRadiusForTilingKm) return [centre];
+  if (radiusKm <= CONFIG.tiling.minRadiusForTilingKm) {
+    return {
+      tiles: [centre],
+      truncated: false,
+      candidateCount: 1,
+      requestedRadiusKm: radiusKm,
+      effectiveRadiusKm: radiusKm,
+    };
+  }
 
+  const spacingKm = CONFIG.tiling.spacingKm;
   const stepsPerSide = Math.ceil(radiusKm / spacingKm);
   const latStep = spacingKm / KM_PER_DEGREE_LAT;
   const lngStep = spacingKm / (KM_PER_DEGREE_LAT * Math.cos(toRad(lat)));
 
-  const tiles = [];
+  const candidates = [];
   for (let i = -stepsPerSide; i <= stepsPerSide; i += 1) {
     for (let j = -stepsPerSide; j <= stepsPerSide; j += 1) {
       const tile = { lat: lat + i * latStep, lng: lng + j * lngStep };
-      if (haversineKm(centre, tile) <= radiusKm) tiles.push(tile);
+      if (haversineKm(centre, tile) <= radiusKm) candidates.push(tile);
     }
   }
 
-  // Sort by distance from centre so the densest area is harvested first. If the
-  // cap truncates the job, the operator still gets the most relevant results.
-  tiles.sort((a, b) => haversineKm(centre, a) - haversineKm(centre, b));
+  // Nearest first, so truncation keeps the centre of the requested area rather
+  // than an arbitrary slice of its edge.
+  candidates.sort((a, b) => haversineKm(centre, a) - haversineKm(centre, b));
 
-  return tiles.slice(0, CONFIG.tiling.maxTiles);
+  const truncated = candidates.length > CONFIG.tiling.maxTiles;
+  const tiles = candidates.slice(0, CONFIG.tiling.maxTiles);
+  const effectiveRadiusKm = truncated
+    ? haversineKm(centre, tiles[tiles.length - 1])
+    : radiusKm;
+
+  return {
+    tiles,
+    truncated,
+    candidateCount: candidates.length,
+    requestedRadiusKm: radiusKm,
+    effectiveRadiusKm,
+  };
+}
+
+/** Convenience wrapper for callers that do not need the coverage metadata. */
+export function tileRadius(args) {
+  return planTiles(args).tiles;
 }
 ```
 
@@ -2577,28 +2642,28 @@ import { makeLead } from '../src/core/schema.js';
 const CENTRE = { lat: 33.7609824, lng: 72.342874, zoom: 14.98 };
 
 test('planLegs multiplies keywords by tiles', () => {
-  const legs = planLegs({ keywords: ['dentist', 'orthodontist'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['dentist', 'orthodontist'], ...CENTRE, radiusKm: 2 });
   assert.equal(legs.length, 2, 'one tile at 2 km, so one leg per keyword');
   assert.deepEqual(legs.map((l) => l.query), ['dentist', 'orthodontist']);
 });
 
 test('planLegs produces more legs for a larger radius', () => {
-  const small = planLegs({ keywords: ['dentist'], ...CENTRE, radiusKm: 2 });
-  const large = planLegs({ keywords: ['dentist'], ...CENTRE, radiusKm: 30 });
+  const small = planLegs({ keywords: ['dentist'], ...CENTRE, radiusKm: 2 }).legs;
+  const large = planLegs({ keywords: ['dentist'], ...CENTRE, radiusKm: 30 }).legs;
   assert.ok(large.length > small.length);
 });
 
 test('planLegs appends categories to the query text', () => {
-  const legs = planLegs({ keywords: ['clinic'], categories: ['Dentist'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['clinic'], categories: ['Dentist'], ...CENTRE, radiusKm: 2 });
   assert.match(legs[0].query, /clinic/);
   assert.match(legs[0].query, /Dentist/);
 });
 
 test('planLegs gives every leg a stable unique id', () => {
-  const legs = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 30 });
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 30 });
   const ids = legs.map((l) => l.id);
   assert.equal(new Set(ids).size, ids.length, 'leg ids must be unique');
-  const again = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 30 });
+  const again = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 30 }).legs;
   assert.deepEqual(again.map((l) => l.id), ids, 'leg ids must be stable across calls');
 });
 
@@ -2607,8 +2672,12 @@ test('planLegs rejects an empty keyword list', () => {
 });
 
 test('planLegs caps total legs so a job cannot run away', () => {
-  const legs = planLegs({ keywords: ['a', 'b', 'c', 'd', 'e', 'f'], ...CENTRE, radiusKm: 500 });
+  const { legs, coverage } = planLegs({
+    keywords: ['a', 'b', 'c', 'd', 'e', 'f'], ...CENTRE, radiusKm: 500,
+  });
   assert.ok(legs.length <= 60, `${legs.length} legs exceeds the cap`);
+  assert.equal(coverage.tilesTruncated, true, 'a truncated tile plan must say so');
+  assert.equal(coverage.legsTruncated, true, 'a truncated leg queue must say so');
 });
 
 /** A fake source that returns a fixed set of leads per leg. */
@@ -2626,7 +2695,7 @@ function fakeSource(perLeg, stopReason = 'end_of_list') {
 }
 
 test('runHarvest merges legs and deduplicates across them', async () => {
-  const legs = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const result = await runHarvest({
     legs, pb: '!7i20!8i0',
     source: fakeSource([1, 2, 3]),
@@ -2638,7 +2707,7 @@ test('runHarvest merges legs and deduplicates across them', async () => {
 });
 
 test('runHarvest stops the whole job when a leg reports a block', async () => {
-  const legs = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
   let called = 0;
   const result = await runHarvest({
     legs, pb: '!7i20!8i0',
@@ -2657,7 +2726,7 @@ test('runHarvest stops the whole job when a leg reports a block', async () => {
 });
 
 test('runHarvest stops the whole job when the canary fails', async () => {
-  const legs = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const result = await runHarvest({
     legs, pb: '!7i20!8i0',
     source: {
@@ -2672,7 +2741,7 @@ test('runHarvest stops the whole job when the canary fails', async () => {
 });
 
 test('runHarvest reports progress per leg', async () => {
-  const legs = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const seen = [];
   await runHarvest({
     legs, pb: '!7i20!8i0',
@@ -2687,7 +2756,7 @@ test('runHarvest reports progress per leg', async () => {
 });
 
 test('runHarvest resumes from startAt, skipping completed legs', async () => {
-  const legs = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
   const queried = [];
   await runHarvest({
     legs, pb: '!7i20!8i0', startAt: 2,
@@ -2704,7 +2773,7 @@ test('runHarvest resumes from startAt, skipping completed legs', async () => {
 });
 
 test('runHarvest honours an abort signal between legs', async () => {
-  const legs = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
   const controller = new AbortController();
   let called = 0;
   const result = await runHarvest({
@@ -2732,7 +2801,7 @@ Create `src/pipeline/harvest.js`:
 
 ```js
 import { CONFIG } from '../core/config.js';
-import { tileRadius } from './tiling.js';
+import { planTiles } from './tiling.js';
 import { setPbCentre } from '../sources/google-payload.js';
 import { nextDelayMs } from './guard.js';
 
@@ -2750,11 +2819,11 @@ export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiu
   }
 
   const categorySuffix = categories.length ? ` ${categories.join(' ')}` : '';
-  const tiles = tileRadius({ lat, lng, radiusKm });
+  const plan = planTiles({ lat, lng, radiusKm });
 
   const legs = [];
   for (const keyword of cleanKeywords) {
-    for (const [tileIndex, tile] of tiles.entries()) {
+    for (const [tileIndex, tile] of plan.tiles.entries()) {
       legs.push({
         id: `${keyword}@${tile.lat.toFixed(5)},${tile.lng.toFixed(5)}`,
         query: `${keyword}${categorySuffix}`,
@@ -2767,7 +2836,24 @@ export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiu
     }
   }
 
-  return legs.slice(0, CONFIG.harvest.maxLegsPerRun);
+  const capped = legs.slice(0, CONFIG.harvest.maxLegsPerRun);
+
+  // Coverage is returned rather than swallowed. Two separate caps can shrink what
+  // actually gets searched, and a short list that looks complete is worse than a
+  // short list labelled as short.
+  return {
+    legs: capped,
+    coverage: {
+      tilesPlanned: plan.candidateCount,
+      tilesUsed: plan.tiles.length,
+      tilesTruncated: plan.truncated,
+      requestedRadiusKm: plan.requestedRadiusKm,
+      effectiveRadiusKm: plan.effectiveRadiusKm,
+      legsPlanned: legs.length,
+      legsUsed: capped.length,
+      legsTruncated: capped.length < legs.length,
+    },
+  };
 }
 
 /**
@@ -3767,7 +3853,7 @@ async function startRun(config) {
     throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
   }
 
-  const legs = planLegs(config);
+  const { legs, coverage } = planLegs(config);
   const controller = new AbortController();
   const runId = `run-${Date.now()}`;
 
@@ -3805,6 +3891,7 @@ async function startRun(config) {
       total: result.leads.length,
       completedLegs: result.completedLegs,
       problems: result.problems,
+      coverage,
     };
   } finally {
     activeRun = null;
@@ -4130,6 +4217,20 @@ document.getElementById('run').addEventListener('click', async () => {
   const response = await chrome.runtime.sendMessage(makeRequest(MSG.START_RUN, config));
 
   if (!response.ok) { write(response.error, true); return; }
+
+  // Coverage caps shrink the area actually searched. Say so, loudly, or the
+  // operator reads a short list as a complete one.
+  const c = response.data.coverage;
+  if (c?.tilesTruncated) {
+    write(`COVERAGE CUT: asked for ${c.requestedRadiusKm} km, actually searched about `
+      + `${c.effectiveRadiusKm.toFixed(1)} km. ${c.tilesPlanned} tiles needed, only `
+      + `${c.tilesUsed} allowed. Raise maxTiles in config or use a smaller radius.`, true);
+  }
+  if (c?.legsTruncated) {
+    write(`COVERAGE CUT: ${c.legsPlanned} query legs planned, only ${c.legsUsed} run. `
+      + `Use fewer keywords or raise maxLegsPerRun.`, true);
+  }
+
   write(`finished: ${response.data.stopReason}, ${response.data.total} unique businesses`);
   if (response.data.problems?.length) response.data.problems.forEach((p) => write(p, true));
 });
