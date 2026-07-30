@@ -211,7 +211,7 @@ test('proximity passes when coordinates genuinely surround the queried point', (
   assert.equal(result.proximityJudged, true);
 });
 
-test('CRITICAL GAP 3: a plausible non-CID string landing in name is caught by cross-field identity', () => {
+test('CRITICAL GAP 3: a plausible string landing in name is caught by cross-field collision', () => {
   // The sharpest case. An address string in the name slot is non-empty and not a
   // CID, so every format check passes. Only comparing fields against each other
   // reveals the shift.
@@ -222,7 +222,56 @@ test('CRITICAL GAP 3: a plausible non-CID string landing in name is caught by cr
   }
   const { ok, problems } = runCanary(shifted);
   assert.equal(ok, false, 'name holding the address value means the indices shifted');
-  assert.ok(problems.some((p) => /same value as address/i.test(p)));
+  assert.ok(problems.some((p) => /name.*address.*identical/i.test(p)));
+});
+
+test('the collision sweep catches a shift onto ANY mapped field, not an enumerated few', () => {
+  // An earlier version listed name's forbidden twins explicitly, so a shift
+  // landing name on the phone or the placeId evaded it entirely.
+  for (const [label, index] of [['phone', 178], ['placeId', 78]]) {
+    const shifted = structuredClone(GOOD);
+    for (const entry of shifted[64]) {
+      const r = entry[PAYLOAD_MAP.recordWrapper];
+      r[11] = index === 178 ? r[178][0][0] : r[78];
+    }
+    const { ok } = runCanary(shifted);
+    assert.equal(ok, false, `name holding the ${label} value must abort`);
+  }
+});
+
+test('CRITICAL: a cid repeated across records aborts, since it would collapse every lead into one', () => {
+  // cid is the primary dedupe key. Format and coverage both pass when every
+  // record carries the SAME well-formed cid, and the export would show one row
+  // where eight businesses existed.
+  const collapsed = structuredClone(GOOD);
+  for (const entry of collapsed[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][10] = '0xdeadbeef:0x11112222';
+  }
+  const { ok, problems } = runCanary(collapsed);
+  assert.equal(ok, false, 'a repeated dedupe key must abort');
+  assert.ok(problems.some((p) => /distinct/i.test(p)));
+});
+
+test('a partial lat/lng swap does not hide behind a majority rule', () => {
+  const partial = structuredClone(GOOD);
+  for (const entry of partial[64].slice(0, 3)) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const lat = r[9][2]; const lng = r[9][3];
+    r[9][2] = lng; r[9][3] = lat;
+  }
+  const { ok } = runCanary(partial, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'three of eight records off-target is drift, not noise');
+});
+
+test('a field collision at a quarter of records aborts, closing the boundary gap', () => {
+  // The previous threshold was a strict majority, so an exact 50 percent
+  // collision passed. Genuine data essentially never collides at all.
+  const quarter = structuredClone(GOOD);
+  for (const entry of quarter[64].slice(0, 3)) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[11] = r[18];
+  }
+  assert.equal(runCanary(quarter).ok, false);
 });
 
 test('the phone coverage floor sits near its live baseline, not far below it', () => {

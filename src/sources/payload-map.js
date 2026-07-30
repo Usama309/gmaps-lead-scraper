@@ -129,7 +129,7 @@ function isNonEmptyString(value) {
  * 50% floor for phone, which meant a drift halving real coverage raised no alarm
  * on the field the operator actually dials.
  *
- * Three separate mechanisms, because each catches a different failure:
+ * Four rule-level mechanisms, because each catches a different failure:
  *   required        every record must carry a valid value, at any sample size
  *   minAnyValid     at least one record must, once the sample is 2 or more. This
  *                   catches a TOTAL field loss on a page too small for a
@@ -137,30 +137,38 @@ function isNonEmptyString(value) {
  *                   4-record page could lose phone, rating, reviewCount, lat and
  *                   lng entirely and still report healthy.
  *   minCoverage     a fraction, judged only once the sample is large enough
- *   mustDifferFrom  the value must not equal another field's value on the same
- *                   record. This is how a shift onto a populated-but-plausible
- *                   field gets caught: a bare format check cannot tell a real
- *                   business name from an address string sitting in its slot.
+ *   minUniqueRatio  the values must be mostly distinct. A repeated identifier is
+ *                   drift onto a shared field rather than sparse data, and for cid
+ *                   it would collapse every business into a single exported row.
+ *
+ * A fifth mechanism, the pairwise collision sweep, lives in runCanary rather than
+ * on a rule because it compares every mapped scalar field against every other one.
+ * An earlier version enumerated the pairs to compare, so a shift landing name on
+ * the phone or the website evaded it. Sweeping all pairs closes the whole class.
  */
 export const CANARY_RULES = Object.freeze({
   minRecordsToJudgeCoverage: 5,
   minRecordsToRequireAnyValid: 2,
+  // Real drift is uniform across records, but a stricter threshold costs nothing
+  // and catches a partial swap that a bare majority rule would tolerate.
+  minRecordsNearQuery: 0.9,
+  // Two mapped fields holding the same value on more than a quarter of records
+  // means the indices collided. Genuine data essentially never does this.
+  maxFieldCollisionRatio: 0.25,
   // A record's coordinates should sit near the point we queried. A lat/lng swap
   // passes both range checks whenever |longitude| is under 90, which covers most
   // of the inhabited world, so range validation alone cannot catch it.
   maxDistanceFromQueryKm: 250,
-  minRecordsNearQuery: 0.5,
   fields: Object.freeze([
     Object.freeze({
       field: 'name', required: true, minCoverage: 0.95,
       valid: (v) => isNonEmptyString(v) && !CID_PATTERN.test(v),
-      mustDifferFrom: Object.freeze(['address', 'placeId', 'cid']),
-      why: 'name must be a non-empty string, not a CID, and not a copy of another field',
+      why: 'name must be a non-empty string and not a CID',
     }),
     Object.freeze({
-      field: 'cid', required: true, minCoverage: 0.90,
+      field: 'cid', required: true, minCoverage: 0.90, minUniqueRatio: 0.95,
       valid: (v) => typeof v === 'string' && CID_PATTERN.test(v),
-      why: 'cid is the primary dedupe key; drift landing it on shared text merges distinct businesses',
+      why: 'cid is the primary dedupe key, so it must be well formed AND distinct per record; a repeated cid collapses every business into one exported row',
     }),
     Object.freeze({
       field: 'phone', minAnyValid: true, minCoverage: 0.80,
@@ -193,7 +201,7 @@ export const CANARY_RULES = Object.freeze({
       why: 'categories drive appointment detection in scoring and the category filter',
     }),
     Object.freeze({
-      field: 'placeId', minAnyValid: true, minCoverage: 0.80,
+      field: 'placeId', minAnyValid: true, minCoverage: 0.80, minUniqueRatio: 0.95,
       valid: isNonEmptyString,
       why: 'placeId is the stable Google identifier carried into the export',
     }),
@@ -282,22 +290,15 @@ export function runCanary(parsed, expect = {}) {
       continue;
     }
 
-    if (rule.mustDifferFrom) {
-      for (const other of rule.mustDifferFrom) {
-        const otherPath = PAYLOAD_MAP.record[other];
-        if (!otherPath) continue;
-        const collisions = records.filter((r) => {
-          const a = at(r, path);
-          const b = at(r, otherPath);
-          return a !== null && b !== null && a === b;
-        });
-        if (collisions.length > records.length / 2) {
-          problems.push(
-            `${rule.field} at [${path}] holds the same value as ${other} at `
-            + `[${otherPath}] on ${collisions.length} of ${records.length} records, `
-            + `which means the indices have shifted (${rule.why})`
-          );
-        }
+    if (rule.minUniqueRatio && present.length > 1) {
+      const distinct = new Set(present).size;
+      const ratio = distinct / present.length;
+      if (ratio < rule.minUniqueRatio) {
+        problems.push(
+          `${rule.field} at index path [${path}] holds only ${distinct} distinct `
+          + `values across ${present.length} records. A repeated identifier is not `
+          + `sparse data, it is drift onto a shared field (${rule.why})`
+        );
       }
     }
 
@@ -308,6 +309,36 @@ export function runCanary(parsed, expect = {}) {
           `${rule.field} at index path [${path}] covered only `
           + `${Math.round(coverage * 100)}% of ${records.length} records, `
           + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
+        );
+      }
+    }
+  }
+
+  // Cross-field collision sweep. Enumerating "name must differ from address" only
+  // guards the pairs someone thought of; a shift landing name on the phone, the
+  // website or the joined categories evaded it. Comparing every mapped scalar pair
+  // closes the whole class instead of one instance of it.
+  const scalarFields = CANARY_RULES.fields
+    .map((rule) => rule.field)
+    .filter((field) => {
+      const sample = records.map((r) => at(r, PAYLOAD_MAP.record[field])).find((v) => v !== null);
+      return typeof sample === 'string' || typeof sample === 'number';
+    });
+
+  for (let i = 0; i < scalarFields.length; i += 1) {
+    for (let j = i + 1; j < scalarFields.length; j += 1) {
+      const a = scalarFields[i];
+      const b = scalarFields[j];
+      const collisions = records.filter((r) => {
+        const av = at(r, PAYLOAD_MAP.record[a]);
+        const bv = at(r, PAYLOAD_MAP.record[b]);
+        return av !== null && bv !== null && av === bv;
+      });
+      if (collisions.length > records.length * CANARY_RULES.maxFieldCollisionRatio) {
+        problems.push(
+          `${a} at [${PAYLOAD_MAP.record[a]}] and ${b} at [${PAYLOAD_MAP.record[b]}] `
+          + `hold identical values on ${collisions.length} of ${records.length} `
+          + `records, which means those indices have collided or shifted`
         );
       }
     }
