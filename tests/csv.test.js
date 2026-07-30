@@ -5,6 +5,51 @@ import { CONFIG } from '../src/core/config.js';
 
 const NL = CONFIG.export.csvNewline;
 
+/**
+ * Minimal RFC4180 reader, used so assertions read real cells and real rows.
+ *
+ * Splitting on the delimiter or on the newline is wrong exactly BECAUSE the
+ * escaping works. A quoted field may legally contain either, so a naive split
+ * shifts columns or invents rows and the assertion then compares the wrong
+ * thing. Three tests here failed that way before this helper existed, each time
+ * looking like a bug in the exporter rather than in the test.
+ */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
+      else if (ch === '"') inQuotes = false;
+      else cell += ch;
+      continue;
+    }
+    if (ch === '"') { inQuotes = true; continue; }
+    if (ch === CONFIG.export.csvDelimiter) { row.push(cell); cell = ''; continue; }
+    if (text.startsWith(NL, i)) {
+      row.push(cell); cell = '';
+      rows.push(row); row = [];
+      i += NL.length - 1;
+      continue;
+    }
+    cell += ch;
+  }
+  if (cell.length > 0 || row.length > 0) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+/** Read one named column out of a single-lead CSV. */
+function cellOf(csv, header) {
+  const rows = parseCsv(csv);
+  const index = rows[0].indexOf(header);
+  assert.ok(index >= 0, `no column named ${header}`);
+  return rows[1][index];
+}
+
 function row(overrides = {}) {
   return {
     name: 'Al-Shifa Dental Clinic', categories: ['Dentist'], score: 82,
@@ -36,6 +81,27 @@ test('quotes fields containing the delimiter', () => {
 test('escapes embedded double quotes by doubling them', () => {
   const csv = toCsv([row({ name: 'The "Best" Dentist' })]);
   assert.ok(csv.includes('"The ""Best"" Dentist"'));
+});
+
+test('every escaped field round-trips back to its exact input', () => {
+  // The only real proof for an escaper. A cell that survives quoting but comes
+  // back altered would shift the operator's columns without any visible error.
+  const nasty = [
+    ['comma', 'Pleader Lane, Attock, Punjab'],
+    ['double quote', 'The "Best" Dentist'],
+    ['only a quote', '"'],
+    ['leading quote', '"quoted start'],
+    ['embedded LF', `line one${String.fromCharCode(10)}line two`],
+    ['embedded CRLF', `line one${String.fromCharCode(13, 10)}line two`],
+    ['all at once', `a, b "c"${String.fromCharCode(10)}d`],
+  ];
+  for (const [label, value] of nasty) {
+    const csv = toCsv([row({ address: value })]);
+    const rows = parseCsv(csv);
+    assert.equal(rows.length, 2, `${label} produced ${rows.length} logical rows`);
+    assert.equal(rows[1].length, rows[0].length, `${label} shifted the columns`);
+    assert.equal(cellOf(csv, 'Address'), value, `${label} did not round-trip`);
+  }
 });
 
 test('quotes fields containing newlines so a row cannot split', () => {
@@ -79,6 +145,41 @@ test('accepts a custom column subset', () => {
   const csv = toCsv([row()], [{ key: 'name', header: 'Business' }]);
   assert.equal(csv.split(NL)[0], 'Business');
   assert.equal(csv.split(NL)[1], 'Al-Shifa Dental Clinic');
+});
+
+test('IMPORTANT: a business name that is a spreadsheet formula is neutralised', () => {
+  // Anyone can register a Google Maps listing, and this file is opened directly
+  // in Excel or Sheets, so a name beginning with = + - or @ would execute.
+  for (const name of ['=1+1', '+1+1', '-1+1', '@SUM(A1:A2)', '=HYPERLINK("http://x","click")']) {
+    const cell = cellOf(toCsv([row({ name })]), 'Business');
+    assert.ok(cell.startsWith("'"),
+      `${name} rendered as ${JSON.stringify(cell)}, which a spreadsheet would execute`);
+    assert.equal(cell.slice(1), name, 'the name itself must survive intact');
+  }
+});
+
+test('a negative number is left numeric, since coordinates are legitimately negative', () => {
+  // The mitigation must not turn real latitude and longitude into text.
+  const csv = toCsv([row({ lat: -33.8688, lng: -70.6693 })]);
+  assert.equal(cellOf(csv, 'Latitude'), '-33.8688', 'latitude must stay numeric');
+  assert.equal(cellOf(csv, 'Longitude'), '-70.6693', 'longitude must stay numeric');
+});
+
+test('IMPORTANT: an enrichment field holding an unexpected value throws rather than lying', () => {
+  // A field holding the string 'yes' renders identically to a genuine true, and
+  // one holding 'unknown' renders identically to a genuine null. Nothing
+  // downstream could tell an unverified field from a verified one.
+  for (const [key, bad] of [
+    ['hasBooking', 'yes'], ['hasChatbot', 'unknown'], ['ownerReplies', 'no'],
+    ['hasBooking', 1], ['mobileFriendly', 'mostly'],
+  ]) {
+    assert.throws(() => toCsv([row({ [key]: bad })]), /not one of/,
+      `${key} = ${JSON.stringify(bad)} should have been rejected`);
+  }
+});
+
+test('mobileFriendly partial survives, since a site can be partly responsive', () => {
+  assert.equal(cellOf(toCsv([row({ mobileFriendly: 'partial' })]), 'Mobile friendly'), 'partial');
 });
 
 test('score sorts first in the default column order, because that is what the operator reads', () => {

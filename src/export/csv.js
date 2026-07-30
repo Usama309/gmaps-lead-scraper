@@ -44,13 +44,61 @@ function renderCell(value) {
   return String(value);
 }
 
-function renderEnrichmentCell(value) {
+function renderEnrichmentCell(key, value) {
   if (value === null || value === undefined) return 'unknown';
+
+  const allowed = ENRICHMENT_VALUES.get(key);
+  if (!allowed.has(value)) {
+    throw new Error(
+      `${key} held ${JSON.stringify(value)}, which is not one of `
+      + `${[...allowed].map((v) => JSON.stringify(v)).join(', ')} or null. `
+      + 'Rendering it would make an unverified field indistinguishable from a verified one, '
+      + 'and a subtly wrong export is worse than a failed one because nobody notices it.'
+    );
+  }
   return renderCell(value);
 }
 
-/** Enrichment fields where null must read as "unknown" rather than blank. */
-const ENRICHMENT_KEYS = new Set(['mobileFriendly', 'hasBooking', 'hasChatbot', 'ownerReplies']);
+/**
+ * Enrichment fields, with the exact values each may legitimately hold.
+ *
+ * Validated rather than merely listed. The whole purpose of this module is
+ * keeping "never inspected" distinct from "inspected and absent", and a stray
+ * string would defeat that silently: a field holding the string 'yes' renders
+ * identically to a genuine true, and one holding 'unknown' renders identically
+ * to a genuine null. Nothing downstream could tell them apart.
+ *
+ * mobileFriendly is genuinely tri-valued, since a site can be partly responsive.
+ */
+const ENRICHMENT_VALUES = new Map([
+  ['mobileFriendly', new Set([true, false, 'partial'])],
+  ['hasBooking', new Set([true, false])],
+  ['hasChatbot', new Set([true, false])],
+  ['ownerReplies', new Set([true, false])],
+]);
+
+/**
+ * Characters that make Excel and Google Sheets treat a cell as a formula.
+ *
+ * This matters here specifically. Business names come from Google Maps listings,
+ * which anyone can register, and this file is opened directly in a spreadsheet.
+ * A listing named =HYPERLINK(...) or @SUM(...) would execute on open.
+ */
+const FORMULA_TRIGGERS = ['=', '+', '-', '@', '\t', '\r'];
+
+/**
+ * Prefix a formula-triggering cell so the spreadsheet treats it as text.
+ *
+ * A leading apostrophe is the standard mitigation and is not displayed. Numbers
+ * are exempt, because latitude and longitude are legitimately negative and
+ * prefixing them would turn real coordinates into text.
+ */
+function neutraliseFormula(cell) {
+  if (cell.length === 0) return cell;
+  if (!FORMULA_TRIGGERS.includes(cell[0])) return cell;
+  if (Number.isFinite(Number(cell))) return cell;
+  return `'${cell}`;
+}
 
 function quote(cell) {
   const d = CONFIG.export.csvDelimiter;
@@ -70,8 +118,10 @@ export function toCsv(leads, columns = EXPORT_COLUMNS) {
     columns
       .map((c) => {
         const raw = lead[c.key];
-        const rendered = ENRICHMENT_KEYS.has(c.key) ? renderEnrichmentCell(raw) : renderCell(raw);
-        return quote(rendered);
+        const rendered = ENRICHMENT_VALUES.has(c.key)
+          ? renderEnrichmentCell(c.key, raw)
+          : renderCell(raw);
+        return quote(neutraliseFormula(rendered));
       })
       .join(d)
   );
