@@ -5257,6 +5257,7 @@ Create `tests/messages.test.js`:
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { MSG, makeRequest, makeResponse, isResponse } from '../src/core/messages.js';
 
 test('every message type is a unique namespaced string', () => {
@@ -5296,6 +5297,86 @@ test('makeResponse carries an error string on failure', () => {
 
 test('makeResponse refuses a failure with no error message', () => {
   assert.throws(() => makeResponse(false, null, null), /error message/i);
+});
+
+test('CRITICAL: the content scripts contain no import statement', () => {
+  // Content scripts declared in the manifest are injected as CLASSIC scripts.
+  // There is no manifest key to mark one as a module and this project has no
+  // build step, so a single import statement makes Chrome throw a SyntaxError at
+  // injection and NOTHING in the file runs. The failure is a page-console error
+  // nobody is watching, and harvesting then looks exactly like an empty city.
+  for (const file of ['../src/content/main-world.js', '../src/content/bridge.js']) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /^\s*import\s/m, `${file} cannot use import`);
+    assert.doesNotMatch(source, /^\s*export\s/m, `${file} cannot use export`);
+  }
+});
+
+test('CRITICAL: only the isolated-world half touches chrome.*', () => {
+  // world MAIN is the page's own realm and Chrome does not inject extension
+  // bindings there, so chrome.runtime is undefined. A sendMessage from the MAIN
+  // script throws and the capture never reaches the worker, while everything
+  // still looks correct.
+  const mainWorld = readFileSync(new URL('../src/content/main-world.js', import.meta.url), 'utf8');
+  const bridge = readFileSync(new URL('../src/content/bridge.js', import.meta.url), 'utf8');
+
+  // Matches an actual CALL, not prose. The file's own comments explain why
+  // chrome.* is unavailable, so a bare string check flags its own documentation.
+  assert.doesNotMatch(mainWorld, /chrome\.[\w.]*\(/, 'the MAIN world script cannot call chrome APIs');
+  assert.match(mainWorld, /window\.postMessage/, 'its only route out is a window message');
+  assert.match(bridge, /chrome\.runtime\.sendMessage/, 'the bridge relays to the worker');
+});
+
+test('the duplicated message type matches the real one, since neither file can import', () => {
+  // Both content scripts hardcode CAPTURE_PB because a classic script cannot
+  // import messages.js. This is the guard that stops the copies drifting.
+  for (const file of ['../src/content/main-world.js', '../src/content/bridge.js']) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+    const match = source.match(/const CAPTURE_PB = '([^']+)'/);
+    assert.ok(match, `${file} must declare CAPTURE_PB`);
+    assert.equal(match[1], MSG.CAPTURE_PB, `${file} has drifted from messages.js`);
+  }
+});
+
+test('the bridge validates the sender before relaying a page message', () => {
+  // The page shares this window and can post messages too. A forged pb would not
+  // leak anything, but it would point the harvester somewhere unasked.
+  const bridge = readFileSync(new URL('../src/content/bridge.js', import.meta.url), 'utf8');
+  assert.match(bridge, /event\.source !== window/, 'must reject messages from other frames');
+  assert.match(bridge, /event\.origin !== location\.origin/, 'must reject cross-origin messages');
+  assert.match(bridge, /typeof data\.pb !== 'string'/, 'must validate the payload shape');
+});
+
+test('the MAIN world script survives a bfcache restore', () => {
+  // bfcache fires pagehide on suspend and pageshow on restore. Tearing down
+  // without re-installing leaves a restored tab silently unable to capture.
+  const source = readFileSync(new URL('../src/content/main-world.js', import.meta.url), 'utf8');
+  assert.match(source, /addEventListener\('pageshow', installObservers\)/);
+  assert.doesNotMatch(source, /pagehide[^)]*once:\s*true/, 'teardown must not be once-only');
+});
+
+test('teardown only restores functions that are still ours', () => {
+  // If the page re-wrapped fetch after us, restoring the native function blindly
+  // would discard the page's own patch.
+  const source = readFileSync(new URL('../src/content/main-world.js', import.meta.url), 'utf8');
+  assert.match(source, /window\.fetch === saved\.observedFetch/);
+});
+
+test('the manifest registers both worlds, and only the MAIN one declares world', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const scripts = manifest.content_scripts;
+  assert.equal(scripts.length, 2, 'both halves of the bridge must be registered');
+
+  const main = scripts.find((s) => s.world === 'MAIN');
+  const isolated = scripts.find((s) => s.world === undefined);
+  assert.ok(main, 'one script must run in the MAIN world to see the page fetch');
+  assert.ok(isolated, 'one must run in the isolated world to reach chrome.runtime');
+  assert.deepEqual(main.js, ['src/content/main-world.js']);
+  assert.deepEqual(isolated.js, ['src/content/bridge.js']);
+  for (const script of scripts) {
+    assert.equal(script.run_at, 'document_start', 'both must run before the page fetches');
+    assert.deepEqual(script.matches, ['https://www.google.com/maps/*']);
+  }
 });
 
 test('isResponse distinguishes a response from a request', () => {
@@ -5352,135 +5433,180 @@ export function isResponse(message) {
 Run: `node --test tests/messages.test.js`
 Expected: 8 passing.
 
-- [ ] **Step 5: Write the content script**
+- [ ] **Step 5: Write the MAIN world observer**
 
-Create `src/content/capture.js`:
+Create `src/content/main-world.js`:
 
 ```js
-import { MSG } from '../core/messages.js';
-
 /**
- * Capture a valid `pb` blob from the Maps page's own search request.
+ * Observe the pb parameter on Google's own search request.
  *
- * The blob is opaque and Google-generated. Synthesising one by hand is fragile,
- * so instead we patch `window.fetch` and `XMLHttpRequest.open` to observe the
- * page issuing its own `/search?tbm=map` call and lift the parameter off it.
+ * TWO PLATFORM CONSTRAINTS SHAPE THIS ENTIRE FILE, and both were found by review
+ * after an earlier version that violated both:
  *
- * If Maps ever stops making that request, capture fails loudly. That is
- * deliberate: a silent failure here would look like "this city has no businesses".
+ * 1. NO IMPORTS. Content scripts declared in the manifest are injected as CLASSIC
+ *    scripts. There is no manifest key to mark one as a module, and this project
+ *    has no build step, so an import statement here throws a SyntaxError at
+ *    injection time and NOTHING in the file runs. The message type below is
+ *    therefore duplicated from src/core/messages.js, and a test asserts the two
+ *    never drift apart.
+ *
+ * 2. NO chrome.* APIS. This runs in world MAIN, which is the page's own JavaScript
+ *    realm, and Chrome does not inject extension bindings there. chrome.runtime is
+ *    undefined. The only way out is window.postMessage, picked up by bridge.js
+ *    running in the isolated world where chrome.* does exist.
+ *
+ * Running in MAIN is not optional: the isolated world has its own window.fetch, so
+ * a patch installed there would observe nothing the page does.
  */
-const SEARCH_PATH = '/search';
-const PATCH_FLAG = '__mapProspectorPatched';
+(() => {
+  'use strict';
 
-let capturedPb = null;
+  // Must equal MSG.CAPTURE_PB in src/core/messages.js. Duplicated because this
+  // file cannot import. tests/messages.test.js asserts they match.
+  const CAPTURE_PB = 'mapprospector/capture-pb';
+  const PATCH_FLAG = '__mapProspectorPatched';
+  const SEARCH_PATH = '/search';
+  const MIN_PB_LENGTH = 50;
 
-/**
- * Observe a URL without ever being able to break the host page.
- *
- * Everything here runs inside Google Maps' own JavaScript context, on every
- * fetch the page makes. A throw escaping this function would break Maps for the
- * user, so the whole body is guarded and failures are swallowed deliberately.
- */
-function remember(urlString) {
-  try {
-    const url = new URL(urlString, location.origin);
-    if (!url.pathname.startsWith(SEARCH_PATH)) return;
-    if (url.searchParams.get('tbm') !== 'map') return;
+  let capturedPb = null;
 
-    const pb = url.searchParams.get('pb');
-    if (!pb || pb.length <= 50) return;
-    if (pb === capturedPb) return; // already have this one
+  /**
+   * Never throws. This runs inside Google's own fetch path on every request the
+   * page makes, so an escaping error would break Maps in the operator's browser.
+   */
+  function remember(urlString) {
+    try {
+      const url = new URL(urlString, location.origin);
+      if (!url.pathname.startsWith(SEARCH_PATH)) return;
+      if (url.searchParams.get('tbm') !== 'map') return;
 
-    capturedPb = pb;
-    chrome.runtime
-      .sendMessage({ type: MSG.CAPTURE_PB, payload: { pb, href: location.href } })
-      .catch(() => {
-        // The worker may be asleep. We keep the blob locally and answer the
-        // direct request below, so a dropped message costs nothing.
-      });
-  } catch {
-    // A URL we cannot parse, or a revoked extension context. Never rethrow:
-    // this runs on Google's own fetch path.
+      const pb = url.searchParams.get('pb');
+      if (!pb || pb.length <= MIN_PB_LENGTH || pb === capturedPb) return;
+
+      capturedPb = pb;
+      window.postMessage({ type: CAPTURE_PB, pb, href: location.href }, location.origin);
+    } catch {
+      // A URL we cannot parse, or a torn-down context. Swallowed deliberately.
+    }
   }
-}
 
-/**
- * Patch the page's network primitives, once.
- *
- * Guarded against double injection: Chrome can run a document_start content
- * script more than once on a soft navigation, and patching a patch would build
- * an ever-deeper call chain on every Maps request.
- */
-function installObservers() {
-  if (window[PATCH_FLAG]) return;
+  function installObservers() {
+    // Chrome can run a document_start script more than once on a soft navigation,
+    // and patching a patch builds an ever-deeper call chain on every request.
+    if (window[PATCH_FLAG]) return;
 
-  const nativeFetch = window.fetch;
-  if (typeof nativeFetch === 'function') {
-    window.fetch = function observedFetch(input, init) {
+    const nativeFetch = window.fetch;
+    const nativeOpen = XMLHttpRequest.prototype.open;
+
+    function observedFetch(input, init) {
       const target = typeof input === 'string' ? input : input?.url;
       if (target) remember(target);
       return nativeFetch.call(this, input, init);
-    };
-  }
+    }
 
-  const nativeOpen = XMLHttpRequest.prototype.open;
-  if (typeof nativeOpen === 'function') {
-    XMLHttpRequest.prototype.open = function observedOpen(method, url, ...rest) {
+    function observedOpen(method, url, ...rest) {
       if (url) remember(url);
       return nativeOpen.call(this, method, url, ...rest);
-    };
+    }
+
+    if (typeof nativeFetch === 'function') window.fetch = observedFetch;
+    if (typeof nativeOpen === 'function') XMLHttpRequest.prototype.open = observedOpen;
+
+    Object.defineProperty(window, PATCH_FLAG, {
+      value: { nativeFetch, nativeOpen, observedFetch, observedOpen },
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
   }
 
-  Object.defineProperty(window, PATCH_FLAG, {
-    value: { nativeFetch, nativeOpen },
-    writable: false,
-    enumerable: false,
-    configurable: true,
-  });
-}
+  function removeObservers() {
+    const saved = window[PATCH_FLAG];
+    if (!saved) return;
 
-/** Restore the page's own functions. Exposed for teardown and for debugging. */
-function removeObservers() {
-  const saved = window[PATCH_FLAG];
-  if (!saved) return;
-  if (saved.nativeFetch) window.fetch = saved.nativeFetch;
-  if (saved.nativeOpen) XMLHttpRequest.prototype.open = saved.nativeOpen;
-  delete window[PATCH_FLAG];
-}
+    // Only restore what is still ours. If the page has re-wrapped fetch since,
+    // blindly restoring the native function would discard the page's own patch.
+    if (window.fetch === saved.observedFetch) window.fetch = saved.nativeFetch;
+    if (XMLHttpRequest.prototype.open === saved.observedOpen) {
+      XMLHttpRequest.prototype.open = saved.nativeOpen;
+    }
+    delete window[PATCH_FLAG];
+  }
 
-// Restore the page's own functions if it navigates away or the tab is discarded.
-window.addEventListener('pagehide', removeObservers, { once: true });
+  // bfcache suspends the page and fires pagehide, then fires pageshow on restore.
+  // Without the pageshow half, a restored tab silently loses capture until a hard
+  // reload, and the operator would see a search that harvests nothing.
+  window.addEventListener('pagehide', removeObservers);
+  window.addEventListener('pageshow', installObservers);
 
-installObservers();
-
-// Answer direct requests from the worker for whatever we have captured so far.
-chrome.runtime.onMessage.addListener((message, _sender, respond) => {
-  if (message?.type !== MSG.CAPTURE_PB) return false;
-  respond({
-    ok: Boolean(capturedPb),
-    data: { pb: capturedPb },
-    error: capturedPb ? null : 'no search parameters captured yet',
-  });
-  return true;
-});
+  installObservers();
+})();
 ```
 
-- [ ] **Step 6: Register the content script in manifest.json**
+- [ ] **Step 6: Write the isolated world bridge**
 
-Add to `manifest.json`:
+Create `src/content/bridge.js`:
+
+```js
+/**
+ * Relay captured search parameters from the page's world to the extension.
+ *
+ * Exists purely because the two capabilities we need live in different worlds:
+ * only a MAIN world script can see the page's own fetch, and only an isolated
+ * world script can call chrome.runtime. This file is the isolated half.
+ *
+ * Also a classic script with no imports, for the same reason as main-world.js.
+ */
+(() => {
+  'use strict';
+
+  // Must equal MSG.CAPTURE_PB in src/core/messages.js. See main-world.js.
+  const CAPTURE_PB = 'mapprospector/capture-pb';
+  const MIN_PB_LENGTH = 50;
+
+  window.addEventListener('message', (event) => {
+    // The page can post messages too, so verify the sender and shape before
+    // relaying anything. A forged pb would not leak data, but it would send the
+    // harvester somewhere the operator did not ask for.
+    if (event.source !== window) return;
+    if (event.origin !== location.origin) return;
+
+    const data = event.data;
+    if (!data || data.type !== CAPTURE_PB) return;
+    if (typeof data.pb !== 'string' || data.pb.length <= MIN_PB_LENGTH) return;
+
+    chrome.runtime.sendMessage({ type: CAPTURE_PB, payload: { pb: data.pb, href: data.href } })
+      .catch(() => {
+        // The worker may be asleep. The next search re-sends, and the worker also
+        // restores its last value from session storage on wake.
+      });
+  });
+})();
+```
+
+- [ ] **Step 6b: Register both content scripts**
+
+Replace the `content_scripts` block in `manifest.json` with both halves:
 
 ```json
   "content_scripts": [
     {
       "matches": ["https://www.google.com/maps/*"],
-      "js": ["src/content/capture.js"],
+      "js": ["src/content/main-world.js"],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.google.com/maps/*"],
+      "js": ["src/content/bridge.js"],
+      "run_at": "document_start"
     }
   ],
 ```
 
-`"world": "MAIN"` is required. The patch must run in the page's own JavaScript context, because an isolated world has its own `window.fetch` and would observe nothing.
+The second entry has no `world` key, which means the default isolated world. That is
+deliberate and is where `chrome.runtime` exists.
 
 - [ ] **Step 7: Write background.js**
 
@@ -5498,6 +5624,34 @@ import { putLeads, getAllLeads, getExportedKeys, markExported, saveRun } from '.
 let activeRun = null;
 let latestPb = null;
 
+/**
+ * An MV3 service worker is terminated after roughly 30 seconds of inactivity, and
+ * module state dies with it. Losing the captured pb that way makes an already
+ * successful search report "no search parameters captured yet", so it is mirrored
+ * into session storage, which survives worker restarts within the browser session.
+ */
+const PB_STORAGE_KEY = 'latestPb';
+
+async function rememberPb(pb) {
+  latestPb = pb;
+  try {
+    await chrome.storage.session.set({ [PB_STORAGE_KEY]: pb });
+  } catch (error) {
+    console.error('could not persist the captured search parameters', error);
+  }
+}
+
+async function recallPb() {
+  if (latestPb) return latestPb;
+  try {
+    const stored = await chrome.storage.session.get(PB_STORAGE_KEY);
+    latestPb = stored?.[PB_STORAGE_KEY] ?? null;
+  } catch {
+    latestPb = null;
+  }
+  return latestPb;
+}
+
 function broadcast(type, payload) {
   chrome.runtime.sendMessage({ type, payload }).catch(() => {
     // No listener open. Progress messages are advisory, so dropping one is fine.
@@ -5506,7 +5660,9 @@ function broadcast(type, payload) {
 
 async function startRun(config) {
   if (activeRun) throw new Error('a run is already in progress');
-  if (!latestPb) {
+
+  const pb = await recallPb();
+  if (!pb) {
     throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
   }
 
@@ -5514,22 +5670,42 @@ async function startRun(config) {
   const controller = new AbortController();
   const runId = `run-${Date.now()}`;
 
+  // Serialises every store write for this run, so they land in order and can be
+  // drained before the run reports done.
+  let pendingWrites = Promise.resolve();
+
   activeRun = { runId, controller, legs };
   await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
 
   try {
     const result = await runHarvest({
       legs,
-      pb: latestPb,
+      pb,
       source: googlePayloadSource,
       signal: controller.signal,
-      onLeads: (leads) => { putLeads(leads).catch((e) => console.error('putLeads failed', e)); },
+      // Writes are chained rather than fired and forgotten. Overlapping calls
+      // against a merge-on-write store can interleave, and an un-awaited write is
+      // simply lost if the worker is evicted mid-flight, with the failure landing
+      // in a console nobody is watching.
+      onLeads: (leads) => {
+        pendingWrites = pendingWrites
+          .then(() => putLeads(leads))
+          .then((result) => {
+            if (result.failed?.length) {
+              console.error(`${result.failed.length} leads could not be stored`, result.failed);
+            }
+          })
+          .catch((error) => console.error('storing leads failed', error));
+      },
       onProgress: (p) => {
         broadcast(MSG.RUN_PROGRESS, p);
-        saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }).catch(() => {});
+        pendingWrites = pendingWrites
+          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }))
+          .catch(() => {});
       },
     });
 
+    await pendingWrites;
     await putLeads(result.leads);
     await saveRun({
       id: runId, config, legs,
@@ -5568,7 +5744,7 @@ async function exportLeads(filterState) {
 }
 
 const HANDLERS = {
-  [MSG.CAPTURE_PB]: async (payload) => { latestPb = payload.pb; return { captured: true }; },
+  [MSG.CAPTURE_PB]: async (payload) => { await rememberPb(payload.pb); return { captured: true }; },
   [MSG.START_RUN]: (payload) => startRun(payload),
   [MSG.ABORT_RUN]: async () => {
     if (!activeRun) return { aborted: false };
