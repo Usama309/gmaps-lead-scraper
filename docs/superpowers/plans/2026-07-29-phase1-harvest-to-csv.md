@@ -5826,8 +5826,16 @@ cp docs/superpowers/specs/assets/dashboard-mockup.html src/ui/dashboard/index.ht
 Then in `src/ui/dashboard/index.html`, make three changes:
 
 1. Wrap the content in a real document: add `<!DOCTYPE html><html><head><meta charset="utf-8">` before the `<title>`, close `</head><body>` before the `.mp` div, and `</body></html>` at the end. The mockup was authored for an environment that supplied the skeleton.
-2. Delete the `LEADS` array and the `render()` bootstrap call from the inline script. Real data replaces them.
-3. Add `<script type="module" src="dashboard.js"></script>` immediately before `</body>`.
+2. Delete the mockup's ENTIRE inline render path, not merely the `LEADS` array and the bootstrap
+   call. The mockup's own event handlers, helpers and render function all reference that data, so
+   trimming only the two obvious lines leaves handlers that throw a ReferenceError on every rail
+   click and that race dashboard.js's real bindings, cancelling each other out. Keep all HTML and
+   CSS exactly as approved; remove only the dead script.
+3. Fix the footer copy. The mockup says "Nothing is scraped or exported here", which was true of a
+   demo and is false in the shipped tool. A UI that misdescribes what it is doing is a correctness
+   bug, not a cosmetic one. Replace that line with one describing the real behaviour, for example
+   noting that exported leads are remembered so the next sweep can skip them.
+4. Add `<script type="module" src="dashboard.js"></script>` immediately before `</body>`.
 
 - [ ] **Step 2: Write dashboard.js**
 
@@ -5838,7 +5846,6 @@ import { MSG, makeRequest } from '../../core/messages.js';
 import { DEFAULT_FILTER_STATE } from '../../pipeline/filter.js';
 
 const state = { ...DEFAULT_FILTER_STATE, exportedKeys: null };
-let currentLeads = [];
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -5917,7 +5924,6 @@ function renderStats(leads, totalStored) {
 async function refresh() {
   try {
     const { leads, totalStored } = await send(MSG.GET_LEADS, state);
-    currentLeads = leads;
     renderRows(leads);
     renderStats(leads, totalStored);
   } catch (error) {
