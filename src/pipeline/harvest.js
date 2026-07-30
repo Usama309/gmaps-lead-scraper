@@ -29,9 +29,7 @@ function assertLegResult(result, leg) {
     );
   }
   if (!Array.isArray(result.leads)) {
-    throw new Error(
-      `leg ${leg.id} returned leads as ${Array.isArray(result.leads) ? 'array' : typeof result.leads}, expected an array`
-    );
+    throw new Error(`leg ${leg.id} returned leads as ${typeof result.leads}, expected an array`);
   }
   assertStopReason(result.stopReason);
 }

@@ -184,26 +184,47 @@ test('CRITICAL: an unknown stopReason is rejected rather than read as success', 
 
 test('CRITICAL: a halted leg is retried on resume, not skipped forever', async () => {
   // completedLegs used to advance before the halt check, so a blocked leg was
-  // recorded as done. Resuming from it skipped that leg permanently.
+  // recorded as done and resuming skipped it permanently. That slice of the
+  // market would be silently absent from every later run.
+  //
+  // The block MUST land on a leg after the first. Blocking on leg 0 leaves
+  // completedLegs at 0 under both the old and the new behaviour, so such a test
+  // passes either way and proves nothing.
   const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  assert.ok(legs.length >= 3, 'this test needs at least three legs');
+
+  let seen = 0;
   const blocked = await runHarvest({
     legs, pb: '!7i20!8i0',
-    source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'blocked', problems: ['HTTP 429'] }; } },
+    source: {
+      id: 'fake',
+      async harvestLeg() {
+        seen += 1;
+        return seen === 1
+          ? { leads: [], stopReason: 'end_of_list', problems: [] }
+          : { leads: [], stopReason: 'blocked', problems: ['HTTP 429'] };
+      },
+    },
     delay: async () => {},
   });
   assert.equal(blocked.stopReason, 'blocked');
-  assert.equal(blocked.completedLegs, 0, 'the blocked leg must NOT be counted as completed');
+  assert.equal(blocked.completedLegs, 1,
+    'leg 0 completed and leg 1 blocked, so exactly one leg is done');
 
   const queried = [];
   await runHarvest({
     legs, pb: '!7i20!8i0', startAt: blocked.completedLegs,
     source: {
       id: 'fake',
-      async harvestLeg({ query }) { queried.push(query); return { leads: [], stopReason: 'end_of_list', problems: [] }; },
+      async harvestLeg({ query }) {
+        queried.push(query);
+        return { leads: [], stopReason: 'end_of_list', problems: [] };
+      },
     },
     delay: async () => {},
   });
-  assert.equal(queried[0], legs[0].query, 'resume must retry the leg that was blocked');
+  assert.equal(queried[0], legs[1].query,
+    'resume must retry the BLOCKED leg, not the one after it');
 });
 
 test('problems from every leg are carried out, not only halting ones', async () => {
@@ -221,20 +242,37 @@ test('problems from every leg are carried out, not only halting ones', async () 
 test('onLeads receives only newly seen leads, never duplicates', async () => {
   // Legs overlap by design, so passing the raw list would make a streaming
   // consumer write the same business more than once.
+  //
+  // The overlap must be PARTIAL. If both legs return identical sets, the second
+  // leg contributes nothing fresh and the old code's own emptiness guard
+  // suppressed the duplicate by accident, so the test passed either way.
   const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const shared = makeLead({ cid: '0xA:0xA', name: 'Shared', phone: '+92 1' });
-  const only = makeLead({ cid: '0xB:0xB', name: 'Only', phone: '+92 2' });
+  const firstOnly = makeLead({ cid: '0xB:0xB', name: 'FirstOnly', phone: '+92 2' });
+  const secondOnly = makeLead({ cid: '0xC:0xC', name: 'SecondOnly', phone: '+92 3' });
+
   const emitted = [];
+  let leg = 0;
   await runHarvest({
     legs, pb: '!7i20!8i0',
     onLeads: (batch) => emitted.push(...batch.map((l) => l.name)),
     source: {
       id: 'fake',
-      async harvestLeg() { return { leads: [shared, only], stopReason: 'end_of_list', problems: [] }; },
+      async harvestLeg() {
+        leg += 1;
+        return {
+          leads: leg === 1 ? [shared, firstOnly] : [shared, secondOnly],
+          stopReason: 'end_of_list',
+          problems: [],
+        };
+      },
     },
     delay: async () => {},
   });
-  assert.deepEqual(emitted, ['Shared', 'Only'], `emitted ${JSON.stringify(emitted)}`);
+
+  assert.deepEqual(emitted, ['Shared', 'FirstOnly', 'SecondOnly'],
+    `Shared must be emitted once, got ${JSON.stringify(emitted)}`);
+  assert.equal(new Set(emitted).size, emitted.length, 'no lead may be emitted twice');
 });
 
 test('runHarvest rejects an out-of-range startAt instead of reporting empty success', async () => {
