@@ -2,7 +2,6 @@ import { MSG, makeRequest } from '../../core/messages.js';
 import { DEFAULT_FILTER_STATE } from '../../pipeline/filter.js';
 
 const state = { ...DEFAULT_FILTER_STATE, exportedKeys: null };
-let currentLeads = [];
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -81,7 +80,6 @@ function renderStats(leads, totalStored) {
 async function refresh() {
   try {
     const { leads, totalStored } = await send(MSG.GET_LEADS, state);
-    currentLeads = leads;
     renderRows(leads);
     renderStats(leads, totalStored);
   } catch (error) {

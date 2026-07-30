@@ -19,3 +19,10 @@
   cannot throw on the now-undefined `LEADS`, and scoped its leftover `.mp-chip` toggle to
   chips `dashboard.js` does not own, since the two toggle handlers on the same element were
   cancelling each other's `aria-pressed` state on every click. No HTML or CSS changed.
+- [2026-07-30 01:30 PM] Corrected the dashboard footer, which claimed "Nothing is scraped or
+  exported here" on the same screen as a working export button that writes a CSV and marks
+  leads exported. It now states that the leads are real and that exporting records them so the
+  next sweep can skip them.
+
+### Removed
+- [2026-07-30 01:30 PM] Unused `currentLeads` variable in `dashboard.js`, written but never read

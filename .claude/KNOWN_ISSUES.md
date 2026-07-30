@@ -20,13 +20,15 @@
 - The dashboard's "Social links" chips (Facebook/Instagram/Any) toggle visually but filter
   nothing, since `hasSocials` is not in `dashboard.js`'s `bind()`. Matches the plan's documented
   Tier 3 deferral to Phase 2.
-- The dashboard footer still reads "Mockup with sample Attock-area data. Nothing is scraped or
-  exported here." That sentence is now false (the page is wired to the real pipeline) but was
-  left as-is rather than silently edited, since it is copy inside the operator-approved mockup
-  and the task brief limited HTML edits to three specific, non-copy changes. Flagged for the
-  operator to confirm before it ships user-facing.
 
 ## Resolved
+- [2026-07-30] The dashboard footer read "Mockup with sample Attock-area data. Nothing is
+  scraped or exported here." while sitting on the same screen as a working export button that
+  writes a CSV and calls `markExported`. A UI that misdescribes what it does on the surface
+  where it does it is a correctness bug, not a cosmetic one, since the operator calibrates
+  trust from that text. Replaced with copy stating that the leads are real and that exporting
+  records them so the next sweep can skip them. The amber/grey legend lines beneath it were
+  accurate and are unchanged.
 - [2026-07-30] Task 14: the approved mockup's inline script called an undefined `LEADS` after
   the sample-data array was removed, and its `.mp-chip` toggle raced `dashboard.js`'s own toggle
   on the same Technology-filter chips, cancelling the visible `aria-pressed` state on every
