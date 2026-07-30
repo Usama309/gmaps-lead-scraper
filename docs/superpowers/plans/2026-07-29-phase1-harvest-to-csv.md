@@ -459,10 +459,13 @@ export const CONFIG = deepFreeze({
     latencyEwmaAlpha: 0.3,
     // Pause if smoothed latency exceeds this multiple of the baseline.
     latencyBreachMultiple: 4,
-    // The baseline is the median of this many opening samples, not the first one.
+    // The baseline comes from this many opening samples, not from the first one.
     // A single unlucky slow request used to set it permanently and silently
     // disable the entire pressure signal.
     baselineSamples: 5,
+    // Never let the baseline fall below this. One anomalously fast response (a
+    // cached reply) would otherwise make ordinary latency look like a breach.
+    baselineFloorMs: 200,
     // An absolute ceiling, so a high baseline cannot switch detection off
     // altogether. Recon saw 980 ms normally and 2.2 s under burst.
     absoluteLatencyCeilingMs: 15000,
@@ -2825,13 +2828,38 @@ test('a non-text body classifies as blocked instead of throwing', () => {
 });
 
 test('CRITICAL: one slow first request cannot permanently disable the latency watch', () => {
-  // The baseline used to be the first sample. A slow opening request set it high
-  // forever, after which nothing could breach and the pressure signal was dead.
+  // Deliberately chosen so the OLD behaviour cannot pass. With the baseline set
+  // from the first sample, the threshold would be 30000 x 4 = 120000, which a
+  // sustained 100000 never reaches, so the watch stayed silent forever. Taking
+  // the second smallest of the opening samples puts the baseline near 900, where
+  // a sustained 100000 breaches on the relative check alone.
   const watch = createLatencyWatch();
-  watch.observe(5000);
+  watch.observe(30000);
+  for (let i = 0; i < 4; i += 1) watch.observe(900);
   let breached = false;
-  for (let i = 0; i < 30 && !breached; i += 1) breached = watch.observe(60000);
-  assert.equal(breached, true, 'a sustained 60 second response must breach despite a slow first sample');
+  for (let i = 0; i < 10 && !breached; i += 1) breached = watch.observe(100000);
+  assert.equal(breached, true, 'a slow opening sample must not blind the watch');
+});
+
+test('one anomalously fast response does not drag the baseline down', () => {
+  // The mirror risk of using the minimum: a cached 50 ms reply would make
+  // ordinary latency look like a breach and train the operator to ignore it.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [50, 900, 950, 1000, 980, 1000, 950, 900]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'normal latency after one fast outlier is not pressure');
+});
+
+test('the absolute ceiling covers a slowdown that begins during warmup', () => {
+  // When the warmup window is itself contaminated, no relative comparison can
+  // help, so the ceiling is the only thing that can fire. Documenting that it is
+  // load-bearing rather than a backstop.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (let i = 0; i < 10 && !breached; i += 1) breached = watch.observe(60000);
+  assert.equal(breached, true, 'a uniformly slow run must still breach');
 });
 
 test('the latency watch ignores broken measurements rather than absorbing them', () => {
@@ -2989,6 +3017,7 @@ export function createLatencyWatch() {
     latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
   } = CONFIG.guard;
 
+
   const warmup = [];
   let baseline = null;
   let ewma = null;
@@ -3007,12 +3036,25 @@ export function createLatencyWatch() {
       if (baseline === null) {
         warmup.push(ms);
         if (warmup.length < baselineSamples) return false;
-        // Median of the opening samples, not the first one. A single unlucky slow
-        // request used to become the permanent baseline, after which nothing could
-        // ever breach and the pressure signal was silently dead.
+
+        // Second smallest of the opening samples, floored.
+        //
+        // Not the first sample: one unlucky slow opening request became the
+        // permanent baseline and nothing could ever breach again.
+        // Not the median either: if the slowdown begins DURING warmup, most
+        // samples are already slow and the median absorbs the very thing we are
+        // trying to detect.
+        // Not the minimum: a single cached fast reply would drag the baseline down
+        // and make ordinary latency look like a breach.
+        // The second smallest is robust to one anomaly in either direction and
+        // estimates unloaded latency, which is what a pressure signal needs.
         const sorted = [...warmup].sort((a, b) => a - b);
-        baseline = sorted[Math.floor(sorted.length / 2)];
+        baseline = Math.max(sorted[1] ?? sorted[0], CONFIG.guard.baselineFloorMs);
       }
+
+      // The absolute ceiling is load-bearing, not a backstop. When the warmup
+      // window is itself contaminated by a slowdown, no relative comparison can
+      // help, and this is the only thing left that fires.
 
       // The absolute ceiling means a legitimately high baseline cannot switch
       // detection off altogether.
