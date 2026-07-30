@@ -95,7 +95,33 @@ export const googlePayloadSource = {
     while (offset < CONFIG.harvest.perQueryCap) {
       if (signal?.aborted) return { leads, stopReason: 'aborted', problems: [] };
 
-      const page = await fetchPage({ query, pb: setPbOffset(pb, offset), signal });
+      // Every exit from this loop must be a RETURN, never a throw. `leads` already
+      // holds everything harvested so far, and a rejected fetch that escaped would
+      // discard all of it. The two most common real-world failures both arrive as
+      // rejections rather than responses: a flaky network, and the operator
+      // pressing Stop while a request is in flight.
+      let page;
+      try {
+        page = await fetchPage({ query, pb: setPbOffset(pb, offset), signal });
+      } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted) {
+          return { leads, stopReason: 'aborted', problems: [] };
+        }
+        return {
+          leads,
+          stopReason: 'network_error',
+          problems: [`request failed at offset ${offset}: ${error?.message ?? String(error)}`],
+        };
+      }
+
+      if (!page || typeof page !== 'object') {
+        return {
+          leads,
+          stopReason: 'network_error',
+          problems: [`fetchPage returned ${page === null ? 'null' : typeof page} instead of a response`],
+        };
+      }
+
       const transport = classifyTransport(page);
 
       if (transport.state === 'blocked') {
@@ -135,6 +161,17 @@ export const googlePayloadSource = {
       }
 
       leads.push(...pageLeads);
+
+      // Enforce the cap on RECORDS, not on the offset. Paging by 20 up to an
+      // offset of 247 admits 13 full pages, which is 260 records, so the cap was
+      // only honoured because Google happens to self-truncate its last page. That
+      // is an assumption about someone else's server, not a guarantee.
+      if (leads.length >= CONFIG.harvest.perQueryCap) {
+        leads.length = CONFIG.harvest.perQueryCap;
+        onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
+        return { leads, stopReason: 'cap_reached', problems: [] };
+      }
+
       onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
 
       offset += CONFIG.harvest.pageSize;

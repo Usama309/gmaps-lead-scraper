@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertSource } from '../src/sources/source.js';
+import { CONFIG } from '../src/core/config.js';
 import { setPbOffset, setPbCentre, googlePayloadSource } from '../src/sources/google-payload.js';
 
 const PB = '!4m12!1m3!1d5000!2d72.342874!3d33.7609824!2m3!1f0!2f0!3f0!7i20!8i0!10b1';
@@ -103,17 +104,101 @@ test('harvestLeg never retries through a block', async () => {
   assert.equal(calls, 1, 'a block must stop the leg on the first occurrence');
 });
 
-test('harvestLeg respects the per query cap', async () => {
+test('CRITICAL: a rejected fetch returns a result instead of throwing away the run', async () => {
+  // The most common real failure. Every lead already collected lives in the
+  // returned object, so a throw here would discard a completed page of work.
+  let call = 0;
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => {
+      call += 1;
+      if (call === 1) return { status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) };
+      throw new Error('network reset');
+    },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'network_error');
+  assert.equal(result.leads.length, 20, 'page one leads must survive a page two failure');
+  assert.ok(result.problems.some((p) => /network reset/.test(p)));
+});
+
+test('CRITICAL: an abort mid-flight returns aborted and keeps what was harvested', async () => {
+  // The Stop button. A real fetch rejects with AbortError while in flight, which
+  // is the realistic case: checking the signal only between pages misses it.
+  let call = 0;
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => {
+      call += 1;
+      if (call === 1) return { status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) };
+      const error = new Error('The operation was aborted');
+      error.name = 'AbortError';
+      throw error;
+    },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'aborted');
+  assert.equal(result.leads.length, 20, 'stopping must not discard collected leads');
+});
+
+test('a pre-aborted signal stops before any request is made', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let called = 0;
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    signal: controller.signal,
+    fetchPage: async () => { called += 1; return { status: 200, body: '' }; },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'aborted');
+  assert.equal(called, 0);
+});
+
+test('a malformed response object classifies rather than throwing', async () => {
+  for (const bad of [undefined, null, 'a string', 42]) {
+    const result = await googlePayloadSource.harvestLeg({
+      query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+      fetchPage: async () => bad,
+      delay: async () => {},
+    });
+    assert.ok(['network_error', 'blocked'].includes(result.stopReason),
+      `response ${JSON.stringify(bad)} produced ${result.stopReason}`);
+    assert.equal(result.leads.length, 0);
+  }
+});
+
+test('the cap counts RECORDS, not offsets, so it cannot overshoot', async () => {
+  // Paging by 20 up to an offset of 247 admits 13 full pages, which is 260
+  // records. The old code only honoured the cap because Google happens to
+  // self-truncate its final page, which is an assumption about someone else's
+  // server rather than a guarantee.
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => ({ status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) }),
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'cap_reached');
+  assert.equal(result.leads.length, CONFIG.harvest.perQueryCap,
+    `expected exactly ${CONFIG.harvest.perQueryCap} records, got ${result.leads.length}`);
+});
+
+test('harvestLeg stops paging once the cap is reached', async () => {
+  let calls = 0;
   const result = await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
     lat: 33.7609824,
     lng: 72.342874,
-    fetchPage: async () => ({ status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) }),
+    fetchPage: async () => {
+      calls += 1;
+      return { status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) };
+    },
     delay: async () => {},
   });
   assert.equal(result.stopReason, 'cap_reached');
-  assert.ok(result.leads.length <= 260, `runaway: ${result.leads.length}`);
+  const expectedCalls = Math.ceil(CONFIG.harvest.perQueryCap / CONFIG.harvest.pageSize);
+  assert.equal(calls, expectedCalls, `paged ${calls} times, expected ${expectedCalls}`);
 });
 
 test('harvestLeg treats total extraction failure as drift, not a finished leg', async () => {

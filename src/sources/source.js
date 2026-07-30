@@ -8,7 +8,7 @@
  * stopReason is one of: 'end_of_list' | 'cap_reached' | 'blocked' | 'canary_failed' | 'aborted'
  */
 export const STOP_REASONS = Object.freeze([
-  'end_of_list', 'cap_reached', 'blocked', 'canary_failed', 'aborted',
+  'end_of_list', 'cap_reached', 'blocked', 'canary_failed', 'aborted', 'network_error',
 ]);
 
 export function assertSource(candidate) {
