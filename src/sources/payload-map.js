@@ -122,6 +122,26 @@ function isNonEmptyString(value) {
 }
 
 /**
+ * A phone number contains only dialling characters. Deliberately strict: a loose
+ * "has seven digits" test also accepts a Google place ID like ChIJ1234567, which
+ * let phone and placeId swap places with both values still looking valid.
+ */
+function looksLikePhone(value) {
+  return typeof value === 'string'
+    && /^[+(]?[\d][\d\s\-().]*$/.test(value.trim())
+    && countDigits(value) >= 7;
+}
+
+/**
+ * A Google place ID starts with a letter and is long. Requiring the leading
+ * letter is what stops a phone number passing as a place ID, closing the other
+ * direction of the same swap.
+ */
+function looksLikePlaceId(value) {
+  return typeof value === 'string' && /^[A-Za-z]/.test(value) && value.trim().length >= 8;
+}
+
+/**
  * What a healthy payload looks like, field by field.
  *
  * Coverage floors sit close to the live measurement (98% phone, 98% rating,
@@ -172,7 +192,7 @@ export const CANARY_RULES = Object.freeze({
     }),
     Object.freeze({
       field: 'phone', minAnyValid: true, minCoverage: 0.80,
-      valid: (v) => typeof v === 'string' && countDigits(v) >= 7,
+      valid: looksLikePhone,
       why: 'phone is the field the operator actually dials; measured at 98% live',
     }),
     Object.freeze({
@@ -202,7 +222,7 @@ export const CANARY_RULES = Object.freeze({
     }),
     Object.freeze({
       field: 'placeId', minAnyValid: true, minCoverage: 0.80, minUniqueRatio: 0.95,
-      valid: isNonEmptyString,
+      valid: looksLikePlaceId,
       why: 'placeId is the stable Google identifier carried into the export',
     }),
     Object.freeze({
@@ -311,6 +331,28 @@ export function runCanary(parsed, expect = {}) {
           + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
         );
       }
+    }
+  }
+
+  // Relational invariants. Two numeric fields can swap places while both remain
+  // individually valid, which no per-field validator and no equality sweep can
+  // see. A real business has far more reviews than its rating is high, so the
+  // ordering between them is a cheap, reliable tell.
+  const paired = records
+    .map((r) => ({
+      rating: at(r, PAYLOAD_MAP.record.rating),
+      reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
+    }))
+    .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
+
+  if (paired.length > 0) {
+    const ordered = paired.filter((v) => v.reviewCount >= v.rating);
+    if (ordered.length < paired.length * 0.9) {
+      problems.push(
+        `reviewCount is smaller than rating on ${paired.length - ordered.length} of `
+        + `${paired.length} records. Real businesses have more reviews than their `
+        + `rating is high, so those two indices have most likely swapped`
+      );
     }
   }
 

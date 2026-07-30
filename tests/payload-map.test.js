@@ -298,6 +298,76 @@ test('categories, placeId and address are validated, since scoring and export de
   assert.equal(runCanary(broken).ok, false, 'categories as a bare string must abort');
 });
 
+test('a phone and placeId SWAP aborts, since both would otherwise look valid', () => {
+  // The hardest class: two fields exchange values and each still passes a loose
+  // validator. A digit-heavy place ID satisfied "has seven digits" and a phone
+  // number satisfied "is a non-empty string", so the swap was invisible.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const phone = r[178][0][0];
+    r[178][0][0] = r[78];
+    r[78] = phone;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'a phone/placeId exchange must abort');
+  assert.ok(problems.some((p) => /phone|placeId/i.test(p)));
+});
+
+test('a real rating and reviewCount swap aborts on the rating range check', () => {
+  // With genuine values, exchanging the two puts a review count like 87 into the
+  // rating slot, which the 0 to 5 range check rejects outright.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const rating = r[4][7];
+    r[4][7] = r[4][8];
+    r[4][8] = rating;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false);
+  assert.ok(problems.some((p) => /rating/i.test(p)));
+});
+
+test('a swap whose values BOTH stay in range aborts on the ordering invariant', () => {
+  // The genuinely hard case, and the one a reviewer used to break an earlier
+  // version. Both fields stay numeric and both stay inside their own valid range,
+  // so no per-field check and no equality sweep can see it. Only the relation
+  // between them gives it away: a real business has more reviews than its rating
+  // is high, so reviewCount below rating means those indices exchanged.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = 4.5;
+    r[4][8] = 2;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'reviewCount below rating on every record is a swap');
+  assert.ok(problems.some((p) => /smaller than rating|swapped/i.test(p)));
+});
+
+test('the ordering invariant tolerates a genuinely tiny business', () => {
+  // A brand new listing with 4 reviews and a 4.0 rating is real, not drift.
+  const tiny = structuredClone(GOOD);
+  const r = tiny[64][0][PAYLOAD_MAP.recordWrapper];
+  r[4][7] = 4.0; r[4][8] = 4;
+  assert.equal(runCanary(tiny, { lat: 33.7609824, lng: 72.342874 }).ok, true);
+});
+
+test('a phone number is rejected in the placeId slot and vice versa', () => {
+  const phoneAsPlaceId = structuredClone(GOOD);
+  for (const entry of phoneAsPlaceId[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][78] = '+92 57 261 2201';
+  }
+  assert.equal(runCanary(phoneAsPlaceId).ok, false, 'a phone must not pass as a place ID');
+
+  const placeIdAsPhone = structuredClone(GOOD);
+  for (const entry of placeIdAsPhone[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][178][0][0] = 'ChIJ1234567890';
+  }
+  assert.equal(runCanary(placeIdAsPhone).ok, false, 'a place ID must not pass as a phone');
+});
+
 test('CANARY_RULES marks name and cid as required, since they are the record identity', () => {
   const required = CANARY_RULES.fields.filter((f) => f.required).map((f) => f.field);
   assert.deepEqual(required.sort(), ['cid', 'name']);
