@@ -77,6 +77,63 @@ test('mobile, booking, chatbot and email tri-states filter', () => {
   assert.equal(run([lead({ email: 'a@b.com' }), lead()], { hasEmail: 'yes' }).length, 1);
 });
 
+test('a "no X" filter never returns a lead whose X was never inspected', () => {
+  // An unenriched null means "we have not looked". Treating it as confirmed
+  // absent would put un-inspected businesses into a list the operator trusts.
+  const FIELD_FOR = {
+    hasEmail: 'email', hasSocials: 'socials', hasBooking: 'hasBooking',
+    hasChatbot: 'hasChatbot', ownerReplies: 'ownerReplies',
+  };
+  for (const [filterKey, field] of Object.entries(FIELD_FOR)) {
+    const unlooked = lead({ enriched: false, [field]: null });
+    const looked = lead({ enriched: true, [field]: null });
+    const out = run([unlooked, looked], { [filterKey]: 'no' }).map((l) => l.name);
+    assert.deepEqual(out, [looked.name],
+      `${filterKey} leaked an un-inspected lead into a 'no' filter`);
+  }
+});
+
+test('a "no" filter does match a lead enrichment checked and found empty', () => {
+  const cases = [
+    ['hasEmail', { email: null }],
+    ['hasSocials', { socials: [] }],
+    ['hasBooking', { hasBooking: false }],
+    ['hasChatbot', { hasChatbot: false }],
+    ['ownerReplies', { ownerReplies: false }],
+  ];
+  for (const [key, absent] of cases) {
+    const looked = lead({ ...absent, enriched: true });
+    assert.equal(run([looked], { [key]: 'no' }).length, 1,
+      `${key}:'no' must include an enriched lead confirmed to lack it`);
+  }
+});
+
+test('mobileFriendly "no" treats a partial site as failing mobile', () => {
+  const leads = [
+    lead({ mobileFriendly: false, enriched: true }),
+    lead({ mobileFriendly: 'partial', enriched: true }),
+    lead({ mobileFriendly: true, enriched: true }),
+    lead({ mobileFriendly: null, enriched: false }),
+  ];
+  const no = run(leads, { mobileFriendly: 'no' }).map((l) => l.mobileFriendly);
+  assert.equal(no.length, 2, 'a partially responsive site is still a redesign lead');
+  assert.ok(no.includes(false));
+  assert.ok(no.includes('partial'));
+  assert.ok(!no.includes(true));
+  assert.ok(!no.includes(null), 'an uninspected site is not a confirmed mobile failure');
+});
+
+test('mobileFriendly "yes" matches only a properly responsive site', () => {
+  const leads = [
+    lead({ mobileFriendly: false, enriched: true }),
+    lead({ mobileFriendly: 'partial', enriched: true }),
+    lead({ mobileFriendly: true, enriched: true }),
+    lead({ mobileFriendly: null, enriched: false }),
+  ];
+  const yes = run(leads, { mobileFriendly: 'yes' }).map((l) => l.mobileFriendly);
+  assert.deepEqual(yes, [true]);
+});
+
 test('ownerReplies tri-state filters', () => {
   assert.equal(run([lead({ ownerReplies: true }), lead({ ownerReplies: false })], { ownerReplies: 'yes' }).length, 1);
 });

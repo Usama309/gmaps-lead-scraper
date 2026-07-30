@@ -43,6 +43,20 @@ export const DEFAULT_FILTER_STATE = Object.freeze({
   sortDir: -1,
 });
 
+/**
+ * Fold a nullable enrichment value into a tri-value.
+ *
+ * A null on an UNENRICHED lead means "we have not looked", and that must never
+ * satisfy a "no X" filter: it would put un-inspected businesses into a list the
+ * operator believes is verified. The same null on an ENRICHED lead does mean
+ * confirmed absent, because enrichment ran and found nothing.
+ */
+function presence(lead, value) {
+  const hasValue = Array.isArray(value) ? value.length > 0 : Boolean(value);
+  if (hasValue) return true;
+  return lead.enriched ? false : null;
+}
+
 function triState(setting, value) {
   if (setting === 'any') return true;
   if (setting === 'yes') return value === true;
@@ -79,15 +93,23 @@ export function filterLeads(leads, state) {
 
     if (!triState(f.hasPhone, Boolean(l.phone))) return false;
     if (!triState(f.website, l.hasRealWebsite)) return false;
-    if (!triState(f.hasEmail, Boolean(l.email))) return false;
-    if (!triState(f.hasSocials, l.socials.length > 0)) return false;
-    if (!triState(f.ownerReplies, l.ownerReplies)) return false;
-    if (!triState(f.hasBooking, l.hasBooking)) return false;
-    if (!triState(f.hasChatbot, l.hasChatbot)) return false;
+    // All five enrichment fields go through presence() so "not looked" and
+    // "looked and absent" stay distinguishable regardless of whether the field
+    // is value-typed (email, socials) or boolean (booking, chatbot, replies).
+    if (!triState(f.hasEmail, presence(l, l.email))) return false;
+    if (!triState(f.hasSocials, presence(l, l.socials))) return false;
+    if (!triState(f.ownerReplies, presence(l, l.ownerReplies))) return false;
+    if (!triState(f.hasBooking, presence(l, l.hasBooking))) return false;
+    if (!triState(f.hasChatbot, presence(l, l.hasChatbot))) return false;
 
     // mobileFriendly is tri-valued in the data ('partial'), so it cannot use triState.
+    // 'partial' counts as a fails-mobile lead: the owner sells mobile-friendly
+    // redesigns, so a half-responsive site is still a real prospect, just a weaker
+    // one. Scoring prices that difference; the filter only asks "is it properly
+    // responsive or not". A null still matches neither, because we have not looked.
     if (f.mobileFriendly === 'yes' && l.mobileFriendly !== true) return false;
-    if (f.mobileFriendly === 'no' && l.mobileFriendly !== false) return false;
+    if (f.mobileFriendly === 'no'
+      && !(l.mobileFriendly === false || l.mobileFriendly === 'partial')) return false;
 
     if (f.tech.length && !f.tech.includes(l.websiteTech)) return false;
 
