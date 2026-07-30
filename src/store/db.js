@@ -20,6 +20,10 @@ let dbPromise = null;
 export function openDb() {
   if (dbPromise) return dbPromise;
 
+  // A REJECTED promise must never stay cached. Without this, one transient
+  // failure (a version conflict, a blocked tab) permanently bricks storage for
+  // the rest of the session, long after the cause has gone away, and every later
+  // call rejects with the same stale error.
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(CONFIG.db.name, CONFIG.db.version);
 
@@ -43,6 +47,8 @@ export function openDb() {
     request.onerror = () => reject(request.error);
   });
 
+  dbPromise.catch(() => { dbPromise = null; });
+
   return dbPromise;
 }
 
@@ -64,18 +70,28 @@ export async function putLeads(leads) {
   let inserted = 0;
   let merged = 0;
 
+  // Per-lead, not per-batch. A single unstorable record used to abort the loop
+  // and leave the caller with a bare error and no idea which rows landed, so a
+  // harvest could half-save in silence. Losing one lead is acceptable; losing the
+  // other nineteen without saying so is not.
+  const failed = [];
+
   for (const lead of leads) {
-    const existing = await wrap(store.get(lead.key));
-    if (existing) {
-      await wrap(store.put(mergeLead(existing, lead)));
-      merged += 1;
-    } else {
-      await wrap(store.put(lead));
-      inserted += 1;
+    try {
+      const existing = await wrap(store.get(lead.key));
+      if (existing) {
+        await wrap(store.put(mergeLead(existing, lead)));
+        merged += 1;
+      } else {
+        await wrap(store.put(lead));
+        inserted += 1;
+      }
+    } catch (error) {
+      failed.push({ key: lead.key, reason: error?.message ?? String(error) });
     }
   }
 
-  return { inserted, merged };
+  return { inserted, merged, failed };
 }
 
 export async function getAllLeads() {
@@ -107,8 +123,16 @@ export async function getDomainCache(domain) {
   const row = await wrap(tx(db, STORES.domainCache, 'readonly').get(domain));
   if (!row) return null;
 
-  const ageDays = (Date.now() - new Date(row.cachedAt).getTime()) / 86400000;
-  if (ageDays > CONFIG.enrich.domainCacheTtlDays) return null;
+  // A corrupt or missing timestamp parses to NaN, and every comparison against
+  // NaN is false, so a stale row would have read as permanently fresh. A
+  // future-dated row means the clock moved and is equally untrustworthy. Both are
+  // treated as a miss, because re-fetching costs one request while trusting bad
+  // cache data poisons every later decision about that domain.
+  const cachedAt = new Date(row.cachedAt).getTime();
+  if (!Number.isFinite(cachedAt)) return null;
+
+  const ageDays = (Date.now() - cachedAt) / 86400000;
+  if (ageDays < 0 || ageDays > CONFIG.enrich.domainCacheTtlDays) return null;
   return row.data;
 }
 

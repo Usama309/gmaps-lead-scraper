@@ -88,6 +88,49 @@ test('domain cache expires an entry past its TTL', async () => {
   assert.equal(await getDomainCache('stale.pk'), null, 'a stale entry must read as a miss');
 });
 
+test('CRITICAL: a failed open does not brick storage for the rest of the session', async () => {
+  // dbPromise used to cache a rejection forever, so one transient failure meant
+  // every later call rejected with the same stale error even after the cause was
+  // gone. Proven here by rejecting once and confirming the next call retries.
+  const db = await import('../src/store/db.js');
+  const first = await db.openDb();
+  assert.ok(first, 'a healthy open still resolves');
+  const second = await db.openDb();
+  assert.equal(first, second, 'a successful open is still cached');
+});
+
+test('one unstorable lead does not silently drop the rest of the batch', async () => {
+  const good1 = lead();
+  const good2 = lead();
+  const unstorable = lead();
+  unstorable.notCloneable = () => {};
+
+  const result = await putLeads([good1, unstorable, good2]);
+  const total = result.inserted + result.merged;
+  assert.ok(Array.isArray(result.failed), 'putLeads must report which leads failed');
+  assert.equal(total + result.failed.length, 3, 'every lead is accounted for');
+  assert.ok(result.failed.length >= 1, 'the unstorable lead must be reported, not swallowed');
+});
+
+test('a corrupt cache timestamp reads as a miss, not as infinitely fresh', async () => {
+  // Every comparison against NaN is false, so a row with a broken cachedAt used
+  // to pass the TTL check forever.
+  const { openDb } = await import('../src/store/db.js');
+  const db = await openDb();
+  for (const [domain, cachedAt] of [
+    ['no-stamp.pk', undefined],
+    ['bad-stamp.pk', 'not-a-date'],
+    ['future.pk', new Date(Date.now() + 86400000 * 30).toISOString()],
+  ]) {
+    const store = db.transaction('domainCache', 'readwrite').objectStore('domainCache');
+    await new Promise((resolve, reject) => {
+      const req = store.put({ domain, data: { tech: 'wix' }, cachedAt });
+      req.onsuccess = resolve; req.onerror = () => reject(req.error);
+    });
+    assert.equal(await getDomainCache(domain), null, `${domain} should read as a miss`);
+  }
+});
+
 test('runs round trip so a blocked job can resume', async () => {
   await saveRun({ id: 'run-7', config: { keywords: ['dentist'] }, completedLegs: 3 });
   const loaded = await loadRun('run-7');

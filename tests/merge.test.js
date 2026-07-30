@@ -55,6 +55,39 @@ test('merging unions the socials list without duplicates', () => {
   assert.deepEqual([...merged.socials].sort(), ['facebook', 'instagram']);
 });
 
+test('CRITICAL: a re-harvest with no website does not erase a known platform', () => {
+  // makeLead derives websiteTech from the website URL, so a record without one
+  // reports 'none' by construction rather than by observation. Treating that as
+  // fresh enrichment overwrote a platform already identified, which is precisely
+  // the silent erasure this function exists to prevent.
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'Al-Shifa', website: 'https://alshifa.pk',
+    enriched: true, websiteTech: 'wordpress', mobileFriendly: false,
+  });
+  const reharvest = makeLead({ cid: '0xa:0xb', name: 'Al-Shifa', enriched: true });
+
+  const merged = mergeLead(stored, reharvest);
+  assert.equal(merged.websiteTech, 'wordpress', 'a leg with no website must not clear the platform');
+  assert.equal(merged.mobileFriendly, false, 'other enrichment must survive too');
+});
+
+test('a re-harvest that DID inspect a site updates the platform', () => {
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'X', website: 'https://x.pk', enriched: true, websiteTech: 'wordpress',
+  });
+  const rebuilt = makeLead({
+    cid: '0xa:0xb', name: 'X', website: 'https://x.webflow.io', enriched: true, websiteTech: 'webflow',
+  });
+  assert.equal(mergeLead(stored, rebuilt).websiteTech, 'webflow');
+});
+
+test('a non-array socials value cannot spread into single characters', () => {
+  const stored = makeLead({ cid: '0xa:0xb', name: 'X', enriched: true, socials: ['facebook'] });
+  const odd = makeLead({ cid: '0xa:0xb', name: 'X', enriched: true });
+  odd.socials = 'instagram';
+  assert.deepEqual(mergeLead(stored, odd).socials, ['facebook']);
+});
+
 test('merging is pure and mutates neither argument', () => {
   const incoming = makeLead({ cid: '0xa:0xb', name: 'X', rating: 5 });
   const a = JSON.stringify(existing); const b = JSON.stringify(incoming);

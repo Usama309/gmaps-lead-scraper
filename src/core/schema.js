@@ -83,9 +83,18 @@ const MAPS_FIELDS = [
   'hasRealWebsite', 'permanentlyClosed', 'placeId',
 ];
 
-/** Fields that come from enrichment and must survive a re-harvest. */
+/**
+ * Fields that come from enrichment and must survive a re-harvest.
+ *
+ * websiteTech is deliberately NOT here. It is DERIVED from the website URL rather
+ * than observed independently, so makeLead reports 'none' for any record without
+ * one. Treating that as fresh enrichment let a leg carrying no website overwrite a
+ * platform we had already identified, which is exactly the silent erasure this
+ * function exists to prevent. It is merged separately, below, and only when the
+ * incoming record actually looked at a site.
+ */
 const ENRICHMENT_FIELDS = [
-  'websiteTech', 'mobileFriendly', 'hasBooking', 'hasChatbot',
+  'mobileFriendly', 'hasBooking', 'hasChatbot',
   'email', 'ownerReplies', 'lastReviewDays',
 ];
 
@@ -120,7 +129,15 @@ export function mergeLead(existing, incoming) {
     for (const field of ENRICHMENT_FIELDS) {
       if (!isEmpty(incoming[field])) merged[field] = incoming[field];
     }
-    merged.socials = [...new Set([...(existing.socials ?? []), ...(incoming.socials ?? [])])];
+
+    // Only accept a platform reading from a record that actually had a site to
+    // read. See the note on ENRICHMENT_FIELDS above.
+    if (incoming.hasRealWebsite && !isEmpty(incoming.websiteTech)) {
+      merged.websiteTech = incoming.websiteTech;
+    }
+
+    const incomingSocials = Array.isArray(incoming.socials) ? incoming.socials : [];
+    merged.socials = [...new Set([...(existing.socials ?? []), ...incomingSocials])];
   }
 
   return merged;
