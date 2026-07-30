@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "MapProspector",
+  "version": "0.1.0",
+  "description": "Harvest, score and export local business leads.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz0iBCZ+q+8CYtL7pIuODaFMWiPkUXIxQWTiT+RR1p5++K6FIuZLM9v7knXVBQKjDAlCdLwKClRNANOl0UK0q0bNJkYu2rjPnLJC85AubIroQb7Ed96r1CtuRAJ1F+cwRJom9pS4B+uBeK08ztP74eqA5XAO3nOW4nV61iIwTy1EqyOk4XRN0J8k99p/gRWzpfmSXRql96Onswo5CcU+5/MYDinSyeUYzjVUkV46KxGheWur1MYi7r/VG33LMF0Rlpgdx0F8kV0dw9SU3Tocc3f9ZGxBF6eNBhgv+8TkWcV/X4gAnKHN1OkhKIehYFtKEVMtXf4id6eiV74ST0iJ3ywIDAQAB",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "MapProspector"
+  },
+  "side_panel": {
+    "default_path": "src/ui/sidepanel/index.html"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "sidePanel",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.google.com/*",
+    "http://*/*",
+    "https://*/*"
+  ]
+}
