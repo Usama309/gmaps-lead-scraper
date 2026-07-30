@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- [2026-07-30 08:00 PM] BLOCKER found by the final whole-branch review: the default filter carried
+  maxReviews Infinity, which becomes null over the extension message boundary and then compares as
+  zero, so the dashboard and CSV silently kept only businesses with no reviews at all
+- [2026-07-30 08:00 PM] Seven more from the same review, including a merge that flipped
+  hasRealWebsite to false on re-harvest and a stale "No website" verdict beside a live URL
+
+
 ### Added
 - [2026-07-30 05:30 PM] Phase 1 complete in code: harvest, dedupe, score, filter and CSV export,
   across 14 tasks and 242 passing tests

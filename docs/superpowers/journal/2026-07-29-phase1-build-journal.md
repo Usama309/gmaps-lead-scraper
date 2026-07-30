@@ -1,15 +1,20 @@
 # Phase 1 Build Journal
 
-Copied out of the git-ignored subagent workspace so it survives a `git clean`. This is the
-decision record for how Phase 1 was built: every review finding, the ruling on it, and the
-reasoning behind that ruling. Read the two sections at the end first if you are picking this
-work up cold.
+Copied out of the git-ignored subagent workspace so it survives a `git clean`. This is the decision
+record for how Phase 1 was built: every review finding, the ruling on it, and the reasoning.
 
-The single most useful thing in here: 46 real defects were found across 14 tasks, and every one
-of them was in the PLAN, not in a subagent misreading it. Transcription was byte-perfect every
-time. A conventional spec-compliance review would have passed all 46, because they all did match
-the spec. The spec was wrong. Instruct reviewers to attack the code rather than confirm it, and
-instruct implementers to measure rather than accept your framing.
+47 real defects were found across 14 tasks, and every one was in the PLAN rather than in a subagent
+misreading it. Transcription was byte-perfect every time. A conventional spec-compliance review would
+have passed all 47, because they all did match the spec. The spec was wrong.
+
+Two habits produced that result, and they are worth more than any individual fix:
+  1. Instruct reviewers to ATTACK the module rather than confirm it, and to test both directions so
+     tightening does not trade real coverage for false alarms.
+  2. Instruct implementers to MEASURE rather than accept your framing. Subagents caught five
+     regression tests of mine that passed against the very code they were written to catch.
+
+The final whole-branch review earned its place separately: the blocker it found existed only at the
+boundary between two modules, so no per-module review could have seen it.
 
 ---
 
@@ -558,6 +563,36 @@ Task 14: ADR-006 records a deliberate trade in the export split: a page closed b
 Task 14: PARKED — none of the five UI fixes has a test. background.js and the UI files are not
   unit-testable in this harness, so a green suite means "nothing regressed", not "the fixes work".
   FIRST-RUN.md steps 6.3 and 6.4 are the real proof and must be run.
+
+## FINAL WHOLE-BRANCH REVIEW (opus, 67 commits) — one BLOCKER plus seven
+Scoped to what per-task reviews structurally could not see: integration seams, cross-module
+contradictions, the stop-reason state machine, and what the operator actually ends up believing.
+
+BLOCKER, and the sharpest defect of the project. DEFAULT_FILTER_STATE carried maxReviews: Infinity.
+  That object crosses chrome.runtime.sendMessage, which serialises as JSON, and Infinity has no JSON
+  form: it arrives as null. `reviewCount > null` then compares against ZERO, so the DEFAULT filter
+  kept only businesses with no reviews at all. Verified by round-tripping the real default: three
+  leads in, one out. The operator would have harvested 400 businesses, opened the dashboard, seen a
+  short plausible list, exported it, and never learned the rest existed.
+  EVERY per-task review missed it because filter.js is tested IN PROCESS, where Infinity works fine.
+  This is the lesson of the whole final-review stage: a per-module review cannot see a defect that
+  only exists at a boundary between modules.
+Then: mergeLead COPIED hasRealWebsite so a derived false overwrote a known true (same class as Task
+  12's C2, routed through a boolean); websiteTech was never re-derived when a later harvest found a
+  site, so a lead could carry a live URL beside a 40-point "No website" verdict; `website` was the
+  only mapped field with NO canary rule despite driving the largest score component; createLatencyWatch
+  had zero callers after three rounds of hardening; a run whose legs all failed reported 'completed';
+  provisional was missing from the CSV; coverage warnings existed only in the final response of a
+  20-minute run, and Start stayed disabled forever if that message rejected.
+All eight fixed and verified against shipped source. Suite 242 -> 255. The fix implementer verified
+  each proof by reverting that fix's specific behavioural line in ISOLATION, which is the correct
+  method: reverting wholesale fails for the wrong reason.
+Final review confirmed: exactly one fetch, credentials 'omit', no other egress. Task 7's parked
+  proximity guarantee LANDED (google-payload throws, harvest passes leg.lat/lng).
+
+## PHASE 1 CLOSED IN CODE. Live run outstanding, and it is the operator's.
+47 defects across 14 tasks, every one in the plan text rather than transcription. Eight would have
+shipped as plausible wrong output rather than errors. docs/FIRST-RUN.md is the remaining step.
 
 ## RESUME INSTRUCTIONS FOR A FRESH SESSION
 Branch: phase-1-harvest-to-csv in ~/Sites/gmaps-lead-scraper. Never work on main.
