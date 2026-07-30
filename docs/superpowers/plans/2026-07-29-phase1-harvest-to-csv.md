@@ -746,6 +746,26 @@ export const LEAD_FIELDS = [
   'email', 'socials', 'ownerReplies', 'lastReviewDays',
 ];
 
+/**
+ * Everything that follows from the website URL alone.
+ *
+ * Extracted so makeLead and mergeLead cannot disagree about it. They did: makeLead
+ * derived these while mergeLead copied them, which is how a derived false came to
+ * overwrite a known true.
+ */
+export function deriveWebsite(rawWebsite) {
+  const website = rawWebsite ? String(rawWebsite).trim() : null;
+  const domain = normalizeDomain(website);
+  const isSocial = domain !== null && SOCIAL_HOSTS.includes(domain);
+
+  return {
+    website,
+    domain,
+    hasRealWebsite: Boolean(website) && domain !== null && !isSocial,
+    websiteTech: !website || domain === null ? 'none' : (isSocial ? 'facebook' : null),
+  };
+}
+
 function numOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -763,13 +783,10 @@ function intOrNull(value) {
  * must never be scored as "it is absent".
  */
 export function makeLead(partial = {}) {
-  const website = partial.website ? String(partial.website).trim() : null;
-  const domain = normalizeDomain(website);
-  const isSocial = domain !== null && SOCIAL_HOSTS.includes(domain);
-
-  let websiteTech = partial.websiteTech ?? null;
-  if (!website || domain === null) websiteTech = 'none';
-  else if (isSocial) websiteTech = 'facebook';
+  const derived = deriveWebsite(partial.website);
+  const { website, domain } = derived;
+  // An explicit platform from enrichment wins, unless the URL itself settles it.
+  const websiteTech = derived.websiteTech ?? (partial.websiteTech ?? null);
 
   const lead = {
     cid: partial.cid ?? null,
@@ -788,7 +805,7 @@ export function makeLead(partial = {}) {
 
     website,
     domain,
-    hasRealWebsite: Boolean(website) && domain !== null && !isSocial,
+    hasRealWebsite: derived.hasRealWebsite,
     permanentlyClosed: partial.permanentlyClosed === true,
 
     enriched: partial.enriched === true,
@@ -1292,6 +1309,37 @@ test('minScore filters', () => {
   assert.equal(out.length, 1);
 });
 
+test('BLOCKER: the default filter survives the message boundary', () => {
+  // DEFAULT_FILTER_STATE crosses chrome.runtime.sendMessage, which serialises as
+  // JSON. Infinity has no JSON form and arrived as null, after which
+  // `reviewCount > null` compares against zero, so the default filter kept ONLY
+  // businesses with no reviews at all. Every in-process test passed, because
+  // Infinity works fine until it is serialised.
+  const leads = [lead({ reviewCount: 120 }), lead({ reviewCount: 4 }), lead({ reviewCount: 0 })];
+
+  const inProcess = filterLeads(leads, DEFAULT_FILTER_STATE);
+  const overTheWire = filterLeads(leads, JSON.parse(JSON.stringify(DEFAULT_FILTER_STATE)));
+
+  assert.equal(inProcess.length, 3, 'the default filter caps nothing');
+  assert.equal(overTheWire.length, 3,
+    `serialising the default state dropped ${inProcess.length - overTheWire.length} leads`);
+});
+
+test('every default filter value survives JSON, since the UI sends this over a port', () => {
+  // Guards the whole object rather than the one field that bit us. Any future
+  // non-serialisable default fails here instead of silently in production.
+  const round = JSON.parse(JSON.stringify(DEFAULT_FILTER_STATE));
+  for (const [key, value] of Object.entries(DEFAULT_FILTER_STATE)) {
+    if (key === 'exportedKeys') continue; // a Set, replaced by the worker
+    assert.deepEqual(round[key], value, `${key} does not survive serialisation`);
+  }
+});
+
+test('an explicit max of zero means zero, not no limit', () => {
+  const leads = [lead({ reviewCount: 5 }), lead({ reviewCount: 0 })];
+  assert.equal(run(leads, { maxReviews: 0 }).length, 1);
+});
+
 test('minRating and maxReviews filter', () => {
   assert.equal(run([lead({ rating: 3.9 }), lead({ rating: 4.8 })], { minRating: 4.5 }).length, 1);
   assert.equal(run([lead({ reviewCount: 50 }), lead({ reviewCount: 900 })], { maxReviews: 500 }).length, 1);
@@ -1443,7 +1491,11 @@ export const DEFAULT_FILTER_STATE = Object.freeze({
 
   // Tier 2, Maps data.
   minReviews: 0,
-  maxReviews: Infinity,
+  // null means no cap, NOT Infinity. This object crosses chrome.runtime.sendMessage,
+  // which serialises as JSON, and Infinity has no JSON form: it arrives as null.
+  // `reviewCount > null` then evaluates as `> 0`, so the default filter silently
+  // kept only businesses with zero reviews. In-process tests never saw it.
+  maxReviews: null,
   hasPhone: 'any',
   website: 'any',
   ownerReplies: 'any',
@@ -1510,7 +1562,11 @@ export function filterLeads(leads, state) {
     if (l.rating !== null && l.rating < f.minRating) return false;
     if (l.reviewCount !== null) {
       if (l.reviewCount < f.minReviews) return false;
-      if (l.reviewCount > f.maxReviews) return false;
+      // Explicit null check. A bare comparison against null is a comparison
+      // against zero, which is the opposite of "no cap".
+      if (f.maxReviews !== null && f.maxReviews !== undefined && l.reviewCount > f.maxReviews) {
+        return false;
+      }
     }
 
     if (!triState(f.hasPhone, Boolean(l.phone))) return false;
@@ -2497,6 +2553,15 @@ export const CANARY_RULES = Object.freeze({
       why: 'categories drive appointment detection in scoring and the category filter',
     }),
     Object.freeze({
+      // No coverage floor on purpose. Live coverage was 67% and a thin market could
+      // be lower, so a percentage here would cry wolf. But total loss must still
+      // abort: this field carries 40 of the 100 score points and the flagship
+      // filter, so a drift here makes EVERY business look like a perfect lead.
+      field: 'website', minAnyValid: true,
+      valid: (v) => typeof v === 'string' && /^https?:\/\//i.test(v),
+      why: 'website drives the largest score component and the no-website filter',
+    }),
+    Object.freeze({
       field: 'placeId', minAnyValid: true, minCoverage: 0.80, minUniqueRatio: 0.95,
       valid: looksLikePlaceId,
       why: 'placeId is the stable Google identifier carried into the export',
@@ -3412,6 +3477,10 @@ function payloadWith(count) {
     r[13] = ['Dentist'];
     r[78] = `ChIJFakePlace${i}`;
     r[18] = `Street ${i}, Attock, Punjab`;
+    // Two thirds carry a website, matching the 67% measured live. The canary
+    // requires at least one, since a total loss of this field would make every
+    // business look like a perfect no-website lead.
+    if (i % 3 !== 0) r[7] = [`https://business${i}.pk/`, `business${i}.pk`];
     records.push([null, r]);
   }
   const p = []; p[64] = records;
@@ -3442,7 +3511,7 @@ Create `src/sources/source.js`:
  */
 export const STOP_REASONS = Object.freeze([
   'end_of_list', 'cap_reached', 'blocked', 'canary_failed', 'aborted', 'network_error',
-  'completed', 'leg_threw',
+  'completed', 'completed_with_errors', 'leg_threw',
 ]);
 
 /**
@@ -3483,7 +3552,7 @@ Create `src/sources/google-payload.js`:
 import { CONFIG } from '../core/config.js';
 import { assertStopReason } from './source.js';
 import { extractPage, runCanary } from './payload-map.js';
-import { classifyTransport, classifyPage, nextDelayMs } from '../pipeline/guard.js';
+import { classifyTransport, classifyPage, nextDelayMs, createLatencyWatch } from '../pipeline/guard.js';
 
 const SEARCH_ENDPOINT = 'https://www.google.com/search';
 
@@ -3575,6 +3644,11 @@ export const googlePayloadSource = {
     let offset = 0;
     let canaryChecked = false;
 
+    // Wired, not decorative. This was hardened across three review rounds and then
+    // had no callers, so only hard block detection was live. Sustained slowdown is
+    // the earliest warning we get that we are pushing too hard, well before a 429.
+    const latency = createLatencyWatch();
+
     // Single exit shape. Every return goes through here, so a mistyped reason
     // throws at the point of return instead of reaching a caller that branches on
     // it and silently falls through to treating the run as successful.
@@ -3654,7 +3728,16 @@ export const googlePayloadSource = {
       }
 
       if (verdict.state === 'extraction_failed') {
-        return finish('canary_failed', [verdict.reason]);
+        return finish('canary_failed', [
+          `${verdict.reason} (${extracted.skipped} of ${extracted.rawCount} records were unusable)`,
+        ]);
+      }
+
+      if (Number.isFinite(page.latencyMs) && latency.observe(page.latencyMs)) {
+        return finish('blocked', [
+          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms), which is the `
+          + 'earliest sign of rate limiting. Stopping rather than pushing through.',
+        ]);
       }
 
       leads.push(...pageLeads);
@@ -3947,7 +4030,8 @@ test('problems from every leg are carried out, not only halting ones', async () 
     source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] }; } },
     delay: async () => {},
   });
-  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.stopReason, 'completed_with_errors',
+    'a run whose legs all failed must not report plain success');
   assert.ok(result.problems.length >= 2, `a degraded run must not look clean: ${JSON.stringify(result.problems)}`);
   assert.ok(result.problems.every((p) => /ECONNRESET/.test(p)));
 });
@@ -4198,6 +4282,11 @@ export async function runHarvest({
   const problems = [];
   let completedLegs = startAt;
 
+  // Index of the first leg that failed without halting the run. Resume restarts
+  // from there rather than past it, so a transient network fault costs a repeat
+  // rather than a hole in coverage. Dedupe makes the repeat free.
+  let firstFailedLeg = null;
+
   const finish = (stopReason) => ({
     leads: [...byKey.values()],
     stopReason: assertStopReason(stopReason),
@@ -4265,13 +4354,19 @@ export async function runHarvest({
       return finish(result.stopReason);
     }
 
-    completedLegs = i + 1;
+    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
+      if (firstFailedLeg === null) firstFailedLeg = i;
+    }
+    completedLegs = firstFailedLeg ?? (i + 1);
 
     if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
   }
 
-  return finish('completed');
+  // A run where legs failed is not a completed run, even though it reached the
+  // end of the queue. Reporting plain success while listing problems underneath
+  // invites the operator to read a degraded harvest as a full one.
+  return finish(problems.length > 0 ? 'completed_with_errors' : 'completed');
 }
 ```
 
@@ -4479,7 +4574,7 @@ test('IMPORTANT: an enrichment field holding an unexpected value throws rather t
     ['hasBooking', 'yes'], ['hasChatbot', 'unknown'], ['ownerReplies', 'no'],
     ['hasBooking', 1], ['mobileFriendly', 'mostly'],
   ]) {
-    assert.throws(() => toCsv([row({ [key]: bad })]), /not one of/,
+    assert.throws(() => toCsv([row({ [key]: bad })]), /which is not/,
       `${key} = ${JSON.stringify(bad)} should have been rejected`);
   }
 });
@@ -4512,6 +4607,10 @@ import { CONFIG } from '../core/config.js';
  */
 export const EXPORT_COLUMNS = Object.freeze([
   { key: 'score', header: 'Score' },
+  // Every Phase 1 score is provisional, because website enrichment does not exist
+  // yet and the mobile and booking components cannot be answered. The dashboard
+  // says so on screen; the CSV is the artifact that outlives the screen.
+  { key: 'provisional', header: 'Score provisional' },
   { key: 'name', header: 'Business' },
   { key: 'categories', header: 'Category' },
   { key: 'reasons', header: 'Why it scored' },
@@ -4551,12 +4650,13 @@ function renderCell(value) {
 
 function renderEnrichmentCell(key, value) {
   if (value === null || value === undefined) return 'unknown';
+  // An empty array is "we looked and found none", which renders like any empty list.
+  if (Array.isArray(value) && value.length === 0) return '';
 
-  const allowed = ENRICHMENT_VALUES.get(key);
-  if (!allowed.has(value)) {
+  const rule = ENRICHMENT_VALUES.get(key);
+  if (!rule.allows(value)) {
     throw new Error(
-      `${key} held ${JSON.stringify(value)}, which is not one of `
-      + `${[...allowed].map((v) => JSON.stringify(v)).join(', ')} or null. `
+      `${key} held ${JSON.stringify(value)}, which is not ${rule.describe} or null. `
       + 'Rendering it would make an unverified field indistinguishable from a verified one, '
       + 'and a subtly wrong export is worse than a failed one because nobody notices it.'
     );
@@ -4576,10 +4676,16 @@ function renderEnrichmentCell(key, value) {
  * mobileFriendly is genuinely tri-valued, since a site can be partly responsive.
  */
 const ENRICHMENT_VALUES = new Map([
-  ['mobileFriendly', new Set([true, false, 'partial'])],
-  ['hasBooking', new Set([true, false])],
-  ['hasChatbot', new Set([true, false])],
-  ['ownerReplies', new Set([true, false])],
+  ['mobileFriendly', { allows: (v) => v === true || v === false || v === 'partial',
+    describe: 'true, false or "partial"' }],
+  ['hasBooking', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  ['hasChatbot', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  ['ownerReplies', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  // email and socials belong here too. They are enrichment, so their null means
+  // never inspected and must read as "unknown" rather than blank, which is what an
+  // absent value looks like for an ordinary column.
+  ['email', { allows: (v) => typeof v === 'string' && v.length > 0, describe: 'an email address' }],
+  ['socials', { allows: (v) => Array.isArray(v), describe: 'an array of links' }],
 ]);
 
 /**
@@ -4729,6 +4835,35 @@ test('merging unions the socials list without duplicates', () => {
   assert.deepEqual([...merged.socials].sort(), ['facebook', 'instagram']);
 });
 
+test('CRITICAL: a re-harvest without the URL does not flip hasRealWebsite to false', () => {
+  // hasRealWebsite is DERIVED from website, so copying it across let a derived
+  // false overwrite a known true. The stored URL survived while the flag did not,
+  // and the lead then matched a "no website" filter while showing its own live URL.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'Clinic', website: 'https://clinic.pk' });
+  assert.equal(stored.hasRealWebsite, true);
+
+  const bare = makeLead({ cid: '0xa:0xb', name: 'Clinic' });
+  const merged = mergeLead(stored, bare);
+
+  assert.equal(merged.website, 'https://clinic.pk', 'the URL survives');
+  assert.equal(merged.hasRealWebsite, true, 'and so must the flag derived from it');
+  assert.equal(merged.domain, 'clinic.pk');
+});
+
+test('CRITICAL: a later harvest that finds a website clears a stale no-website verdict', () => {
+  // websiteTech was only refreshed under incoming.enriched, which is never true in
+  // Phase 1. A lead could carry a live URL and a 40 point "No website" score in the
+  // same exported row.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'Spa' });
+  assert.equal(stored.websiteTech, 'none');
+
+  const found = makeLead({ cid: '0xa:0xb', name: 'Spa', website: 'https://spa.pk' });
+  const merged = mergeLead(stored, found);
+
+  assert.equal(merged.websiteTech, null, 'unknown platform, not a stale "none"');
+  assert.equal(merged.hasRealWebsite, true);
+});
+
 test('CRITICAL: a re-harvest with no website does not erase a known platform', () => {
   // makeLead derives websiteTech from the website URL, so a record without one
   // reports 'none' by construction rather than by observation. Treating that as
@@ -4781,11 +4916,20 @@ Expected: FAIL, `mergeLead` is not exported.
 Append to `src/core/schema.js`:
 
 ```js
-/** Fields that come from Maps and should take the freshest value available. */
+/**
+ * Fields that come from Maps and should take the freshest value available.
+ *
+ * `domain`, `hasRealWebsite` and `websiteTech` are deliberately absent. All three
+ * are DERIVED from `website`, so copying them straight across lets a derived
+ * `false` overwrite a known `true`: a re-harvest whose record happened to omit the
+ * URL flipped hasRealWebsite to false while the stored website survived, and the
+ * lead then matched a "no website" filter while displaying its own live URL. They
+ * are recomputed from the merged website instead, below.
+ */
 const MAPS_FIELDS = [
   'name', 'categories', 'address', 'lat', 'lng',
-  'rating', 'reviewCount', 'phone', 'website', 'domain',
-  'hasRealWebsite', 'permanentlyClosed', 'placeId',
+  'rating', 'reviewCount', 'phone', 'website',
+  'permanentlyClosed', 'placeId',
 ];
 
 /**
@@ -4826,6 +4970,20 @@ export function mergeLead(existing, incoming) {
 
   for (const field of MAPS_FIELDS) {
     if (!isEmpty(incoming[field])) merged[field] = incoming[field];
+  }
+
+  // Recompute everything derived from the website, from the MERGED website.
+  const websiteChanged = merged.website !== existing.website;
+  const derived = deriveWebsite(merged.website);
+  merged.domain = derived.domain;
+  merged.hasRealWebsite = derived.hasRealWebsite;
+
+  // Keep a platform we identified earlier only while it still describes the same
+  // real site. If the website changed or went away, the old platform is stale, and
+  // an unenriched lead would otherwise carry a live URL beside a "No website"
+  // verdict worth 40 score points.
+  if (websiteChanged || !derived.hasRealWebsite) {
+    merged.websiteTech = derived.websiteTech;
   }
 
   // Enrichment only flows in from a record that was actually enriched.
@@ -5408,6 +5566,7 @@ export const MSG = Object.freeze({
   CONFIRM_EXPORT: 'mapprospector/confirm-export',
   RUN_PROGRESS: 'mapprospector/run-progress',
   RUN_BLOCKED: 'mapprospector/run-blocked',
+  RUN_COVERAGE: 'mapprospector/run-coverage',
 });
 
 const KNOWN = new Set(Object.values(MSG));
@@ -5683,6 +5842,12 @@ async function startRun(config) {
   let pendingWrites = Promise.resolve();
 
   await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
+
+  // Announced at the START, not only in the final response. A wide run takes
+  // minutes on a single awaited message, so a warning delivered at the end is lost
+  // if the panel closes or the worker is evicted, and the operator would never
+  // learn their search area was cut.
+  broadcast(MSG.RUN_COVERAGE, coverage);
 
   try {
     const result = await runHarvest({
@@ -6031,7 +6196,7 @@ function bind() {
     state.minReviews = numberOr(e.target.value, 0); refresh();
   });
   $('#f-maxrev').addEventListener('input', (e) => {
-    state.maxReviews = numberOr(e.target.value, Infinity); refresh();
+    state.maxReviews = numberOr(e.target.value, null); refresh();
   });
   $('#f-lastrev').addEventListener('change', (e) => { state.lastReviewWithinDays = Number(e.target.value); refresh(); });
   $('#f-rating').addEventListener('change', (e) => { state.minRating = Number(e.target.value); refresh(); });
@@ -6155,24 +6320,24 @@ runButton.addEventListener('click', async () => {
   };
 
   write(`starting: ${config.keywords.join(', ')} within ${config.radiusKm} km`);
-  const response = await chrome.runtime.sendMessage(makeRequest(MSG.START_RUN, config));
 
-  runButton.disabled = false;
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage(makeRequest(MSG.START_RUN, config));
+  } catch (error) {
+    // Without this the button stays disabled forever on a rejected message and the
+    // operator has to reload the panel to try again.
+    write(`could not reach the extension: ${error?.message ?? error}`, true);
+    return;
+  } finally {
+    runButton.disabled = false;
+  }
 
   if (!response.ok) { write(response.error, true); return; }
 
-  // Coverage caps shrink the area actually searched. Say so, loudly, or the
-  // operator reads a short list as a complete one.
-  const c = response.data.coverage;
-  if (c?.tilesTruncated) {
-    write(`COVERAGE CUT: asked for ${c.requestedRadiusKm} km, actually searched about `
-      + `${c.effectiveRadiusKm.toFixed(1)} km. ${c.tilesPlanned} tiles needed, only `
-      + `${c.tilesUsed} allowed. Raise maxTiles in config or use a smaller radius.`, true);
-  }
-  if (c?.legsTruncated) {
-    write(`COVERAGE CUT: ${c.legsPlanned} query legs planned, only ${c.legsUsed} run. `
-      + `Use fewer keywords or raise maxLegsPerRun.`, true);
-  }
+  // Repeated at the end as well as broadcast at the start, so it is on screen
+  // beside the final count rather than scrolled away.
+  writeCoverage(response.data.coverage);
 
   write(`finished: ${response.data.stopReason}, ${response.data.total} unique businesses`);
   if (response.data.problems?.length) response.data.problems.forEach((p) => write(p, true));
@@ -6187,7 +6352,20 @@ document.getElementById('open').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('src/ui/dashboard/index.html') });
 });
 
+function writeCoverage(c) {
+  if (c?.tilesTruncated) {
+    write(`COVERAGE CUT: asked for ${c.requestedRadiusKm} km, actually searching about `
+      + `${c.effectiveRadiusKm.toFixed(1)} km. ${c.tilesPlanned} tiles needed, only `
+      + `${c.tilesUsed} allowed. Raise maxTiles in config or use a smaller radius.`, true);
+  }
+  if (c?.legsTruncated) {
+    write(`COVERAGE CUT: ${c.legsPlanned} query legs planned, only ${c.legsUsed} will run. `
+      + `Use fewer keywords or raise maxLegsPerRun.`, true);
+  }
+}
+
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === MSG.RUN_COVERAGE) writeCoverage(message.payload);
   if (message?.type === MSG.RUN_PROGRESS) {
     const p = message.payload;
     write(`leg ${p.legIndex + 1}/${p.totalLegs}: +${p.freshLeads} new, ${p.uniqueLeads} unique`);
