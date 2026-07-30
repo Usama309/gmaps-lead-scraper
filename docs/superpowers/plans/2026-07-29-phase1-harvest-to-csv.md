@@ -12,7 +12,7 @@
 
 - **Chrome MV3 only.** Service worker declared with `"type": "module"`.
 - **Every Google request uses `credentials: 'omit'`.** No Google account may ever be attached to a request. This is a binding risk control, not a preference.
-- **Zero runtime dependencies.** No bundler, no transpiler, no npm packages shipped in the extension.
+- **Zero runtime dependencies.** No bundler, no transpiler, no npm packages shipped in the extension. Dev dependencies used only by the test harness are permitted, because nothing in `devDependencies` reaches the browser. Exactly one is used: `fake-indexeddb`.
 - **Pure modules must not import browser APIs.** `score.js`, `filter.js`, `tiling.js`, `identity.js`, `schema.js`, `guard.js`, `payload-map.js`, `csv.js` must be importable in bare Node, because that is how they are tested.
 - **All tunables live in `src/core/config.js`.** All scoring weights live in `src/core/scoring-config.js`. No magic number may appear anywhere else.
 - **Hard cap of 247 results per query.** Page size 20. Offsets step by 20.
@@ -120,7 +120,11 @@ printf '.keys/\n' >> .gitignore
 
 Record the printed extension ID in `.claude/DECISIONS.md`. The private key stays out of git.
 
-- [ ] **Step 4: Write `package.json`**
+- [ ] **Step 4: Write `package.json` and install the one dev dependency**
+
+Run `npm install` after writing the file. It pulls a single package, used only by
+`tests/db.test.js` to provide an in-memory IndexedDB. Nothing in `devDependencies`
+ships in the extension.
 
 ```json
 {
@@ -131,6 +135,9 @@ Record the printed extension ID in `.claude/DECISIONS.md`. The private key stays
   "description": "Chrome extension that harvests and scores Google Maps business leads",
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
   }
 }
 ```
@@ -3001,6 +3008,7 @@ git commit -m "feat: add CSV export preserving the unknown versus absent distinc
 - Modify: `src/core/schema.js` (add `mergeLead`)
 - Create: `src/store/db.js`
 - Create: `tests/merge.test.js`
+- Create: `tests/db.test.js`
 
 **Interfaces:**
 - Consumes: `CONFIG`.
@@ -3011,7 +3019,7 @@ git commit -m "feat: add CSV export preserving the unknown versus absent distinc
   - `saveRun(run)`, `loadRun(id)`, `listRuns()`
   - `getDomainCache(domain)`, `putDomainCache(domain, data)`
 
-**Testing note, stated honestly.** IndexedDB does not exist in bare Node and this project ships zero dependencies, so no fake is available. The pure merge logic is therefore extracted into `schema.js` where it is unit tested, and `db.js` is kept deliberately thin and verified in the browser during Task 14. Do not claim `db.js` is unit tested.
+**Testing note.** IndexedDB does not exist in bare Node, so `tests/db.test.js` loads `fake-indexeddb/auto` to supply an in-memory implementation. This is a dev dependency only and ships nothing. `db.js` holds cross-run dedupe and the domain cache TTL, both of which fail silently when wrong, so leaving it untested was not acceptable. The pure merge logic is additionally unit tested on its own in `schema.js`.
 
 - [ ] **Step 1: Write the failing test for mergeLead**
 
@@ -3292,15 +3300,126 @@ export async function listRuns() {
 }
 ```
 
-- [ ] **Step 6: Run the whole suite**
+- [ ] **Step 6: Write the db tests**
+
+Create `tests/db.test.js`:
+
+```js
+import 'fake-indexeddb/auto';
+import { test, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { makeLead } from '../src/core/schema.js';
+import {
+  putLeads, getAllLeads, clearLeads,
+  getExportedKeys, markExported,
+  putDomainCache, getDomainCache,
+  saveRun, loadRun, listRuns,
+} from '../src/store/db.js';
+
+let n = 0;
+function lead(overrides = {}) {
+  n += 1;
+  return makeLead({ cid: `0xaa${n}:0xbb${n}`, name: `Business ${n}`, phone: '+92 300 000 0000', ...overrides });
+}
+
+beforeEach(async () => { await clearLeads(); });
+
+test('putLeads inserts new leads and reports the count', async () => {
+  const result = await putLeads([lead(), lead()]);
+  assert.equal(result.inserted, 2);
+  assert.equal(result.merged, 0);
+  assert.equal((await getAllLeads()).length, 2);
+});
+
+test('putLeads merges on re-put instead of duplicating', async () => {
+  const a = lead({ rating: 4.3, reviewCount: 87 });
+  await putLeads([a]);
+
+  const enriched = makeLead({
+    cid: a.cid, name: a.name, website: 'https://x.wixsite.com',
+    enriched: true, websiteTech: 'wix', mobileFriendly: false,
+  });
+  const result = await putLeads([enriched]);
+
+  assert.equal(result.inserted, 0);
+  assert.equal(result.merged, 1, 'the same business must not create a second row');
+
+  const stored = await getAllLeads();
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].websiteTech, 'wix', 'enrichment must land');
+  assert.equal(stored[0].rating, 4.3, 'an incoming null must not erase the stored rating');
+});
+
+test('markExported and getExportedKeys round trip, powering cross-run dedupe', async () => {
+  const a = lead(); const b = lead();
+  await putLeads([a, b]);
+  await markExported([a.key], 'run-1');
+
+  const exported = await getExportedKeys();
+  assert.ok(exported instanceof Set);
+  assert.ok(exported.has(a.key));
+  assert.ok(!exported.has(b.key));
+});
+
+test('exported keys survive a leads wipe, because they track history not state', async () => {
+  const a = lead();
+  await putLeads([a]);
+  await markExported([a.key]);
+  await clearLeads();
+  assert.ok((await getExportedKeys()).has(a.key));
+});
+
+test('domain cache returns stored data on a hit', async () => {
+  await putDomainCache('alshifa.pk', { tech: 'wordpress', mobileFriendly: false });
+  assert.deepEqual(await getDomainCache('alshifa.pk'), { tech: 'wordpress', mobileFriendly: false });
+});
+
+test('domain cache returns null on a miss', async () => {
+  assert.equal(await getDomainCache('never-fetched.pk'), null);
+});
+
+test('domain cache expires an entry past its TTL', async () => {
+  // Write a deliberately stale record straight through putDomainCache, then age it
+  // by rewriting cachedAt. Uses the real TTL from config rather than a literal.
+  const { CONFIG } = await import('../src/core/config.js');
+  await putDomainCache('stale.pk', { tech: 'wix' });
+
+  const db = await (await import('../src/store/db.js')).openDb();
+  const store = db.transaction('domainCache', 'readwrite').objectStore('domainCache');
+  const ancient = new Date(Date.now() - (CONFIG.enrich.domainCacheTtlDays + 1) * 86400000);
+  await new Promise((resolve, reject) => {
+    const req = store.put({ domain: 'stale.pk', data: { tech: 'wix' }, cachedAt: ancient.toISOString() });
+    req.onsuccess = resolve; req.onerror = () => reject(req.error);
+  });
+
+  assert.equal(await getDomainCache('stale.pk'), null, 'a stale entry must read as a miss');
+});
+
+test('runs round trip so a blocked job can resume', async () => {
+  await saveRun({ id: 'run-7', config: { keywords: ['dentist'] }, completedLegs: 3 });
+  const loaded = await loadRun('run-7');
+  assert.equal(loaded.completedLegs, 3);
+  assert.deepEqual(loaded.config.keywords, ['dentist']);
+  assert.ok((await listRuns()).some((r) => r.id === 'run-7'));
+});
+
+test('saveRun overwrites the same id rather than appending', async () => {
+  await saveRun({ id: 'run-8', completedLegs: 1 });
+  await saveRun({ id: 'run-8', completedLegs: 5 });
+  assert.equal((await loadRun('run-8')).completedLegs, 5);
+  assert.equal((await listRuns()).filter((r) => r.id === 'run-8').length, 1);
+});
+```
+
+- [ ] **Step 7: Run the whole suite**
 
 Run: `npm test`
-Expected: everything passing. `db.js` is not covered here by design; it is verified in Task 14.
+Expected: everything passing, including the 9 new db tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/core/schema.js src/store/db.js tests/merge.test.js
+git add src/core/schema.js src/store/db.js tests/merge.test.js tests/db.test.js
 git commit -m "feat: add lead merge rules and the IndexedDB store"
 ```
 
@@ -3444,40 +3563,97 @@ import { MSG } from '../core/messages.js';
  * deliberate: a silent failure here would look like "this city has no businesses".
  */
 const SEARCH_PATH = '/search';
+const PATCH_FLAG = '__mapProspectorPatched';
+
 let capturedPb = null;
 
+/**
+ * Observe a URL without ever being able to break the host page.
+ *
+ * Everything here runs inside Google Maps' own JavaScript context, on every
+ * fetch the page makes. A throw escaping this function would break Maps for the
+ * user, so the whole body is guarded and failures are swallowed deliberately.
+ */
 function remember(urlString) {
   try {
     const url = new URL(urlString, location.origin);
     if (!url.pathname.startsWith(SEARCH_PATH)) return;
     if (url.searchParams.get('tbm') !== 'map') return;
+
     const pb = url.searchParams.get('pb');
-    if (pb && pb.length > 50) {
-      capturedPb = pb;
-      chrome.runtime.sendMessage({ type: MSG.CAPTURE_PB, payload: { pb, href: location.href } });
-    }
+    if (!pb || pb.length <= 50) return;
+    if (pb === capturedPb) return; // already have this one
+
+    capturedPb = pb;
+    chrome.runtime
+      .sendMessage({ type: MSG.CAPTURE_PB, payload: { pb, href: location.href } })
+      .catch(() => {
+        // The worker may be asleep. We keep the blob locally and answer the
+        // direct request below, so a dropped message costs nothing.
+      });
   } catch {
-    // A URL we cannot parse is simply not the one we want.
+    // A URL we cannot parse, or a revoked extension context. Never rethrow:
+    // this runs on Google's own fetch path.
   }
 }
 
-const nativeFetch = window.fetch;
-window.fetch = function patchedFetch(input, init) {
-  const target = typeof input === 'string' ? input : input?.url;
-  if (target) remember(target);
-  return nativeFetch.call(this, input, init);
-};
+/**
+ * Patch the page's network primitives, once.
+ *
+ * Guarded against double injection: Chrome can run a document_start content
+ * script more than once on a soft navigation, and patching a patch would build
+ * an ever-deeper call chain on every Maps request.
+ */
+function installObservers() {
+  if (window[PATCH_FLAG]) return;
 
-const nativeOpen = XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open = function patchedOpen(method, url, ...rest) {
-  if (url) remember(url);
-  return nativeOpen.call(this, method, url, ...rest);
-};
+  const nativeFetch = window.fetch;
+  if (typeof nativeFetch === 'function') {
+    window.fetch = function observedFetch(input, init) {
+      const target = typeof input === 'string' ? input : input?.url;
+      if (target) remember(target);
+      return nativeFetch.call(this, input, init);
+    };
+  }
+
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  if (typeof nativeOpen === 'function') {
+    XMLHttpRequest.prototype.open = function observedOpen(method, url, ...rest) {
+      if (url) remember(url);
+      return nativeOpen.call(this, method, url, ...rest);
+    };
+  }
+
+  Object.defineProperty(window, PATCH_FLAG, {
+    value: { nativeFetch, nativeOpen },
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/** Restore the page's own functions. Exposed for teardown and for debugging. */
+function removeObservers() {
+  const saved = window[PATCH_FLAG];
+  if (!saved) return;
+  if (saved.nativeFetch) window.fetch = saved.nativeFetch;
+  if (saved.nativeOpen) XMLHttpRequest.prototype.open = saved.nativeOpen;
+  delete window[PATCH_FLAG];
+}
+
+// Restore the page's own functions if it navigates away or the tab is discarded.
+window.addEventListener('pagehide', removeObservers, { once: true });
+
+installObservers();
 
 // Answer direct requests from the worker for whatever we have captured so far.
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type !== MSG.CAPTURE_PB) return false;
-  respond({ ok: Boolean(capturedPb), data: { pb: capturedPb }, error: capturedPb ? null : 'no pb captured yet' });
+  respond({
+    ok: Boolean(capturedPb),
+    data: { pb: capturedPb },
+    error: capturedPb ? null : 'no search parameters captured yet',
+  });
   return true;
 });
 ```
