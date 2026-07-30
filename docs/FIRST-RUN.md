@@ -156,11 +156,32 @@ proves cross-run deduplication works, which is what stops you phoning the same d
 
 ---
 
+## What a real run will cost you in time
+
+Once the checklist passes, these are the measured shapes of a run. "Likely" assumes most tiles
+return one or two pages, which is what a town the size of Attock actually gives; "worst case" assumes
+every single leg hits the 247 cap, which will not happen outside a major city.
+
+| Search | Query legs | Likely | Worst case | Notes |
+|---|---|---|---|---|
+| 1 keyword, 2 km | 1 | under a minute | under a minute | the first-run setting above |
+| 1 keyword, 15 km | 21 | about 1.5 min | 9 min | full coverage, nothing cut |
+| 3 keywords, 15 km | 60 | about 4 min | 26 min | hits the leg cap, reports COVERAGE CUT |
+| 3 keywords, 30 km | 60 | about 4 min | 26 min | cut on both tiles and legs |
+
+The throttle is deliberately slow: 1.2 to 2.8 seconds between requests, randomised. That is what
+keeps the run below the rate where recon saw any pressure from Google, and it is the main reason a
+wide search takes minutes rather than seconds.
+
+Note the third and fourth rows both report COVERAGE CUT. That is the tool telling you it searched
+less than you asked for, and by how much. It is not an error, and the honest response is either to
+narrow the radius or run one keyword at a time.
+
 ## When it all passes
 
 Tell me and I will widen the defaults, and we can talk about Phase 2, which adds website enrichment:
 platform detection, mobile friendliness, booking widgets and email. That is what turns a provisional
-score into a real one.
+score into a real one, and it is what most of your actual pitch depends on.
 
 ## If something fails
 

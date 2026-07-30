@@ -5,11 +5,11 @@ decision record for how Phase 1 was built: every review finding, the ruling on i
 reasoning behind that ruling. Read the two sections at the end first if you are picking this
 work up cold.
 
-The single most useful thing in here: fourteen real defects were found across eight tasks, and
-every one of them was in the PLAN, not in a subagent misreading it. Transcription was
-byte-perfect every time. A conventional spec-compliance review would have passed all fourteen,
-because they all did match the spec. The spec was wrong. Instruct reviewers to attack the code
-rather than confirm it, and instruct implementers to measure rather than accept your framing.
+The single most useful thing in here: 46 real defects were found across 14 tasks, and every one
+of them was in the PLAN, not in a subagent misreading it. Transcription was byte-perfect every
+time. A conventional spec-compliance review would have passed all 46, because they all did match
+the spec. The spec was wrong. Instruct reviewers to attack the code rather than confirm it, and
+instruct implementers to measure rather than accept your framing.
 
 ---
 
@@ -295,6 +295,270 @@ Not started: Tasks 9-14 (source.js + google-payload.js, harvest.js leg queue, cs
 db.js, content script + background router, dashboard wiring + the live end-to-end run).
 Stopped deliberately at a task boundary rather than mid-task, to keep review depth consistent.
 
+## Session 2 (2026-07-30)
+Task 9: implemented (commit d739574) — 157 tests pass. Carried-forward requirement from Task 7 landed:
+  harvestLeg throws on absent or non-finite lat/lng, verified against 5 bad inputs. credentials:'omit'
+  present with exactly one fetch in the file.
+Task 9: review found TWO CRITICAL, both about the failures this code meets most often rather than
+  exotic ones, and both sharing one root cause:
+  C1 no try/catch around fetchPage. A rejected request escaped harvestLeg as an uncaught rejection
+     instead of a structured result, discarding every lead already collected. Reviewer traced the SAME
+     missing boundary into Task 10's unbuilt runHarvest, where one flaky request would crash a
+     multi-leg run and throw away every completed leg.
+  C2 the abort path was BROKEN, not just untested. signal.aborted was only checked between pages, but
+     a real fetch rejects with AbortError while in flight, which is exactly what pressing Stop does.
+     Same gap. The implementer had flagged this branch as untested; the reviewer showed it was worse.
+  Minor: the cap counted OFFSETS not records. Paging by 20 to an offset of 247 admits 13 full pages =
+     260 records. The documented cap was only honoured because Google self-truncates its last page,
+     which is an assumption about someone else's server, not a guarantee.
+  Ruling: every exit from the paging loop must be a RETURN, never a throw. `leads` holds work already
+  paid for in network time and throttle delay; there is no failure mode where crashing beats returning
+  what was collected plus a reason. Added 'network_error' to STOP_REASONS, wrapped the fetch, and
+  enforced the cap on leads.length. Task 10's brief gains the matching boundary with stopReason
+  'leg_threw'.
+  Controller verified 7 cases: leads preserved through network error (20), mid-flight abort (20) and a
+  late block (20); malformed responses classify instead of crashing; cap lands on exactly 247 not 260.
+Task 9: fix round 1/5 dispatched. Briefs 9 and 10 regenerated before dispatch. Plan: 210 passing.
+
+Task 9: fix round 1/5 (2 Critical + 1 Minor addressed, 0 open; commits d739574..d314dc1) — 162 pass.
+  Implementer measured which of its 6 new tests fail against the old code: 4, not 6. The two that
+  already passed were the pre-aborted-signal case (the top-of-loop check was never the bug, only its
+  being the SOLE check) and the cap call count (old code made the right 13 requests, it just kept all
+  260 records). Precision like that is why the fix history here is trustworthy.
+Task 9: fix round 2/5 dispatched — 2 concerns, both real:
+  (a) source.js's doc comment listed 5 stop reasons while the array had 6, and that comment is the
+      contract Task 10 reads. Fixed by DELETING the prose list rather than patching it: a
+      hand-maintained list drifts the moment a reason is added, which had already happened.
+  (b) STOP_REASONS was documentation nothing validated. This is the important one. Downstream code
+      decides whether to pause, resume or report purely on that string, so a typo would produce a
+      reason no caller branches on, fall through every branch, and be indistinguishable from a clean
+      finish. Same silent-success failure mode as the rest of this task.
+  Ruling: added assertStopReason and routed all NINE returns in harvestLeg through one finish()
+  helper, so a mistyped reason throws at the point of return. Added a test that scans the source for
+  finish() calls and asserts every returned reason is declared, so array and code cannot separate
+  again. STOP_REASONS also gained 'completed' and 'leg_threw' for Task 10.
+  Verified enforcement works and behaviour is unchanged: network_error still returns 20 leads, cap
+  still exactly 247. Plan: 212 passing.
+GOTCHA worth knowing, reported by the implementer: `git add <gitignored path> && git commit` silently
+  no-ops, because git add exits non-zero on an ignored path and && short-circuits. Report files live
+  under the gitignored .superpowers/ workspace, so never chain them into a commit.
+
+Task 9: fix round 2/5 (2 addressed, 0 open; commits d314dc1..73b94e8) — 164 tests pass.
+  Implementer CORRECTED MY COUNT: I said nine returns to convert, the real number is 11, because the
+  two network_error returns are multi-line so their stopReason sits on its own line. Converting only
+  nine would have left two hand-built and unvalidated, i.e. exactly the hole that round was closing.
+  It checked the file rather than trusting my number. Third such catch on this task.
+  It also reported that only 1 of the 2 new tests discriminates (assertStopReason passes the moment
+  the export exists and never touches the harvester), and that measuring had to be done in two stages
+  because a missing export is a link-time SyntaxError that collapses every test in the file into one
+  failure. That level of precision is why this task's fix history can be trusted.
+Task 9: fix round 3/5 dispatched — three residual concerns, all real, all being fixed:
+  (a) the comment claimed no exit ever throws, which stopped being true once finish() validated via
+      assertStopReason. Now distinguishes a PROGRAMMING error (mistyped reason, should be loud in
+      development) from an OPERATIONAL one (network fault, must come back as data). Only the second
+      is caught. Comment precision has caught real problems twice on this project.
+  (b) the scanner test was a regex over call sites, so a changed call shape would match nothing and
+      pass VACUOUSLY over an empty list. Now also asserts zero returns build stopReason by hand,
+      which is the property actually being protected rather than a proxy for it, and the count floor
+      is documented as load-bearing.
+  (c) finish() noted as taking a string literal at every call site, since a variable would compile
+      fine and silently escape the scan.
+  Plan: 212 passing, 0 failing.
+
+CARRY FORWARD INTO TASK 10: STOP_REASONS now declares 'completed' and 'leg_threw', which only
+  runHarvest returns, so nothing in Task 9 exercises them. Task 10's tests MUST cover both, and must
+  verify runHarvest wraps source.harvestLeg in try/catch: without it, one leg throwing discards the
+  leads from every leg already completed. The reviewer traced that exact hole into Task 10's draft.
+
+Task 9: fix round 3/5 (3 addressed, 0 open; commits 73b94e8..d2255b4) — 164 pass.
+  The bypass proof was the most valuable measurement on this task. Reverting ONE return to a
+  hand-built object left 10 real finish() calls, which SATISFIES the >= 10 floor, so the floor alone
+  would have passed and missed the bypass. handBuilt === 0 is the only thing that caught it. That
+  turned round 3 from tidying into a necessary fix, established by testing the guard rather than
+  assuming it fired.
+Task 9: fix round 4/5 (1 addressed, 0 open; commits d2255b4..8e80718) — 164 pass.
+  Round 3's own comment text put a literal finish('...') into the source, and the scanner cannot tell
+  code from prose. It survived only because the pattern demands [a-z_]+ and dots fail that, which is
+  luck rather than design. Anchored on `return finish(`; proved by poisoning a copy, where the loose
+  pattern inflates 11->12 while the anchored one holds at 11.
+Task 9: complete (commits 113acca..8e80718, 4 fix rounds, review clean)
+Task 9: PARKED — the anchor narrows the miscount hazard rather than eliminating it: a comment
+  containing the exact contiguous string `return finish('blocked')` would still be counted. Ruling:
+  acceptable. handBuilt === 0 is independent of the regex, so the real protection does not rest on
+  the pattern. Recorded so the final whole-branch review can weigh it.
+
+Task 9 in summary: FOUR rounds, and in every one the implementer corrected something rather than
+  accepting my framing. It flagged the abort branch as untested (the reviewer then showed it was
+  BROKEN); corrected my return count from nine to eleven by reading the file, where converting nine
+  would have left two unvalidated; showed only 1 of 2 new tests discriminated and why a single-stage
+  measurement could not detect it; proved a guard I added was load-bearing rather than assuming; and
+  caught a hazard my own comment created. Every one came from checking rather than trusting a number
+  in the dispatch.
+
+Task 10: implemented (commit f0d7d2c) — 177 pass. Carried-forward Task 9 boundary landed.
+Task 10: review found 4 Critical + 4 Important, all in the plan text:
+  C1 the try/catch wrapped only the CALL, not the result handling, so a malformed return escaped and
+     destroyed every lead from every completed leg.
+  C2 stopReason never validated, so a bogus value ran the queue and reported 'completed'.
+  C3 leads as a STRING is iterable but not an array, so it was walked character by character into the
+     dedupe map and reported success. Worse than a crash.
+  C4 completedLegs advanced BEFORE the halt check, so a blocked leg was recorded done and every
+     future resume skipped it. That slice of the market would be silently absent forever.
+  I5 non-halting per-leg problems swallowed, so a run where every leg hit ECONNRESET looked clean.
+  I6 onLeads got the raw list, not fresh leads, so a streaming writer would double-write.
+  I7 startAt unvalidated: out of range returned 'completed' with zero leads, reading as success.
+  I8 duplicate keywords produced colliding leg ids, breaking resume-by-index.
+Task 10: fix round 1/5 (8 addressed; commits f0d7d2c..5c71324) — 186 pass, 9 of 22 discriminate.
+Task 10: fix round 2/5 (3 addressed; commits 5c71324..eaba04d) — 186 pass, 10 of 22 discriminate.
+
+## CONTROLLER ERROR, CORRECTED — read this before trusting the blind-test tally
+In round 1 the implementer reported that the C4 test "blocks on leg 0, where completedLegs is 0
+either way". I ACCEPTED THAT WITHOUT VERIFYING IT and told the user, as a headline, that I had
+written a test for the project's worst defect that could not fail. That was FALSE.
+
+The implementer then re-measured and corrected ITSELF, and I verified the correction empirically:
+the old code sets `completedLegs = i + 1` unconditionally, so blocking on leg 0 records 1, while the
+round-1 test asserted 0. It FAILED against the old code. It did discriminate. Reconstruction output:
+  OLD code, block on leg 0 -> completedLegs = 1
+  round-1 test asserted 0 -> FAILED against old code, i.e. it DID discriminate
+The rewrite to block on leg 1 is still better sited (it exercises the resume path meaningfully rather
+than the degenerate first-leg case) and the count moved 9 -> 10 because of the onLeads rewrite alone.
+
+CORRECTED TALLY of genuinely blind tests found this project: THREE, not four.
+  Task 8 latency test passed against the broken baseline (genuine)
+  Task 9 assertStopReason test passed the moment the export existed (genuine)
+  Task 10 onLeads test used identical lead sets so the old guard hid the duplicate (genuine)
+  Task 10 C4 test — NOT blind. My claim, retracted.
+
+The lesson is pointed at me, not the subagent. I spent this session insisting the highest-value habit
+is measuring rather than accepting framing, then accepted a subagent's framing unverified and
+broadcast it. Verify corrections too, including ones that flatter the process.
+
+Task 10: complete (commits 8e80718..eaba04d, 2 fix rounds, review clean) — 186 tests pass.
+
+Task 11: implemented (commit ef05113) — 199 pass.
+Task 11: review found 2 Important, both in the plan text:
+  - FORMULA INJECTION. Business names beginning with = + - or @ were written through unescaped, and
+    Excel and Sheets execute such a cell on open. Google Maps listing names are attacker-registrable
+    and this file is opened directly in a spreadsheet, so this is specific to the tool rather than
+    generic hardening. Fixed with a leading apostrophe, EXEMPTING numbers so that legitimately
+    negative latitude and longitude stay numeric. Getting only half of that right would be worse
+    than neither.
+  - UNVALIDATED ENRICHMENT VALUES. renderEnrichmentCell never type-checked, so a field holding the
+    string 'yes' rendered identically to a genuine true and 'unknown' identically to a genuine null,
+    silently defeating the single guarantee this module exists to provide. Each field now declares
+    its permitted values and an unexpected one throws. mobileFriendly keeps its real third state.
+  Also replaced naive string splitting in the tests with a real RFC4180 reader: three assertions
+  failed by splitting on the delimiter or the newline, which is wrong exactly BECAUSE the escaping
+  works. Each looked like an exporter bug and was a test bug.
+Task 11: fix round 1/5 (2 addressed; commits ef05113..e4f2d8f) — 204 pass.
+Task 11: complete (commits b2e387a..e4f2d8f, 1 fix round, review clean)
+
+## TWO BOOKKEEPING CONVENTIONS, after the Task 11 implementer caught me on both
+1. TWO TEST SUITES EXIST AND THEY WILL NEVER MATCH. The REPO suite covers only tasks built so far
+   (204 at Task 11). The PLAN suite is the extracted-and-run plan code and covers ALL 14 tasks (226),
+   so it is always ahead. My commit messages said "Plan re-verified: 226 passing" without saying
+   which suite, and the implementer correctly flagged that 226 matched no state the repo had been in.
+   Say WHICH SUITE every time.
+2. PLAN-ONLY COMMITS MUST SAY SO. My commits titled like code fixes ("Neutralise spreadsheet
+   formulas...") changed only the plan document; the implementer then makes the matching source
+   change in a separate commit. Reading git log, mine look like the fix and they are not. From here,
+   plan-only commits are titled "plan: ...". Earlier ones cannot be retitled without rewriting
+   history, so this note is the record.
+Also corrected: I described three test changes as discriminating; only 2 of 18 fail against ef05113.
+   The round-trip test passed because the escaping was already correct, and the negative-coordinate
+   test passes VACUOUSLY against unfixed code, since code with no neutralisation trivially leaves
+   negatives numeric. Both are regression guards, which is legitimate, but not gap-closers.
+
+Task 12: implemented (c614312) — 220 pass. Review found 2 Critical + 2 Important, all in plan text:
+  C1 openDb cached its promise INCLUDING rejections, so one transient failure bricked storage for the
+     whole session. Reviewer proved it by deleting the database entirely, removing the cause, and
+     showing openDb still returned the identical stale rejected promise.
+  C2 the exact silent erasure this module exists to prevent. makeLead DERIVES websiteTech from the
+     website URL, so a record without one reports 'none' by construction rather than observation.
+     mergeLead treated that as fresh enrichment, so a re-harvest leg carrying no website overwrote an
+     already-identified platform: stored 'wordpress' became 'none'. Reachable through the documented
+     makeLead -> mergeLead -> putLeads path. Fixed by merging websiteTech only when the incoming
+     record actually inspected a site, i.e. under the same absent-does-not-erase rule the Maps fields
+     already follow, which is where it belonged from the start.
+  I1 store.put throws SYNCHRONOUSLY on a non-cloneable value, not via onerror, so one bad lead in a
+     batch committed some rows, dropped the rest and returned a bare error. Now reports per-lead
+     failures; every input accounted for.
+  I2 getDomainCache computed age without checking the timestamp parsed. NaN comparisons are always
+     false, so a corrupt stamp read as PERMANENTLY fresh. Corrupt, missing and future-dated now miss.
+Task 12: fix rounds 1-2 (5 addressed; commits c614312..e662213) — 227 pass.
+Task 12: complete (commits a18e78d..e662213, 2 fix rounds, review clean)
+Task 12: added closeDb() as real API (the worker needs it to release the handle; an upgrade in
+  another tab blocks until connections close) which also made the recovery path testable.
+
+## THE RECURRING CONTROLLER WEAKNESS, named after the fifth instance
+Subagents have now caught FIVE regression tests of mine that passed against the very code they were
+written to catch: Task 8 latency, Task 9 assertStopReason, Task 10 onLeads, Task 12 storage-bricking,
+plus one I wrongly claimed was blind and retracted. The common cause:
+  I write the assertion that DESCRIBES the fixed behaviour, not the one that SEPARATES it from the
+  broken behaviour. Those coincide only when the bug failed loudly, which is when a test mattered
+  least. When the bug was silent, my test was silent too.
+Counter-habit for whoever continues: after writing any fix, run the new tests against the PRE-FIX
+code and confirm they fail. And isolate properly. The Task 12 implementer showed that running a test
+against old code can fail for the wrong reason (a missing export rather than the defect), so revert
+ONLY the behavioural line and keep any new API the test depends on.
+
+Task 13: implemented (46077da) — 235 pass. Review found the capture mechanism COULD NOT RUN AT ALL,
+  for two independent, individually fatal platform reasons. Both verified against Chromium docs and
+  the chromium-extensions group before rewriting, because the claim was too consequential to accept.
+  C1 capture.js opened with an `import`. Content scripts declared in the manifest are injected as
+     CLASSIC scripts; there is no manifest key to mark one as a module and this project has no build
+     step. Chrome throws SyntaxError at injection and NOTHING in the file runs.
+  C2 it called chrome.runtime from world MAIN. MAIN is the page's own JS realm and Chrome does not
+     inject extension bindings there, so chrome.runtime is undefined. sendMessage was swallowed by
+     the surrounding try/catch; the onMessage listener threw uncaught.
+  Together: inert while every file read correctly, and the planned Task 14 browser check would NOT
+  have caught it because poking the worker console never exercises the content script. The symptom
+  would have been "harvesting returns nothing", indistinguishable from an empty city.
+  Fix: the standard two-world split. main-world.js observes the page's own fetch (only MAIN can see
+  it) and posts a window message; bridge.js runs isolated, where chrome.runtime exists, validates
+  event.source, event.origin and payload shape, and relays. Neither imports; the shared CAPTURE_PB
+  literal is duplicated with a test asserting the copies cannot drift.
+  Four Important also fixed: pageshow re-installs after a bfcache restore; teardown only restores a
+  function still ours; the captured pb is mirrored to chrome.storage.session so MV3 worker eviction
+  does not lose it; store writes are chained and drained rather than fired and forgotten.
+Task 13: fix round 1/5 (2 Critical + 4 Important; commits 46077da..407102b) — 242 pass.
+Task 13: complete (commits e662213..407102b, 1 fix round, review clean)
+
+## CONTROLLER FIX PROMPTED BY TASK 13, and it is the same error class as the five blind tests
+The implementer noted my Task 14 browser verification would not have caught the fault Task 13 just
+fixed: it poked the WORKER console, which passes even when the content script never parsed. Both
+Task 13 and Task 14 now verify from the PAGE console first (window.__mapProspectorPatched must
+exist, window.fetch.name must read observedFetch) and only then ask the worker whether the value
+arrived. That distinguishes "MAIN script never installed" from "installed but bridge not relaying".
+A verification that cannot fail on the bug it exists to catch is the same mistake as a regression
+test that passes against broken code. It was sitting in the one step that gates the live run.
+
+Task 14: implemented Steps 1-6 and 8 (148923d). Step 7, the live harvest, deliberately NOT run by any
+  agent: the operator chose to run it by hand. Checklist written to docs/FIRST-RUN.md.
+Task 14: review found 5, and NOTABLY found NO XSS despite a dispatch that invited one. It traced
+  every interpolated value, confirmed each was escaped, and said the assumption was wrong. Declining
+  to manufacture a steered finding is worth as much as finding one.
+  Medium/High: markExported ran in the same round-trip that built the CSV, BEFORE the dashboard
+    received the response and triggered the download. A blocked download, cancelled save dialog or
+    no-op click left those businesses flagged exported and skipped on every future sweep, silently.
+    Split: export returns keys and marks nothing; the dashboard sends CONFIRM_EXPORT after the click.
+  Medium: real TOCTOU on the run guard. activeRun was set after two awaits, so two fast clicks could
+    both pass and start concurrent pipelines against the shared dedupe store. Slot now claimed
+    synchronously before the first await, released on early failure, Start disabled for the duration.
+  Low latent: esc() escaped angle brackets but not quotes. Safe today (nothing sits in a quoted
+    attribute) but a live injection the day someone writes href="${esc(...)}". Hardened now.
+  Low/Medium: a failed refresh left stale rows and counts under an error toast, reading as current.
+  Low: Number(v) || Infinity meant a max of 0 gave no limit, since 0 is falsy.
+Task 14: fix rounds 1-2 (7 addressed; commits 148923d..e5d16c4) — 242 pass.
+Task 14: complete in code (commits c5a543c..e5d16c4, 2 fix rounds, review clean). Step 7 OUTSTANDING.
+Task 14: ADR-006 records a deliberate trade in the export split: a page closed between click and
+  confirm now means a lead is re-exported rather than silently omitted. Re-contacting a business is
+  recoverable; losing it from every future sweep is not.
+Task 14: PARKED — none of the five UI fixes has a test. background.js and the UI files are not
+  unit-testable in this harness, so a green suite means "nothing regressed", not "the fixes work".
+  FIRST-RUN.md steps 6.3 and 6.4 are the real proof and must be run.
+
 ## RESUME INSTRUCTIONS FOR A FRESH SESSION
 Branch: phase-1-harvest-to-csv in ~/Sites/gmaps-lead-scraper. Never work on main.
 Plan: docs/superpowers/plans/2026-07-29-phase1-harvest-to-csv.md (14 tasks; 1-7 complete)
@@ -327,3 +591,8 @@ Maps. Task 14 Step 7 is the only step that proves any of this works outside a fi
 CARRY FORWARD INTO TASK 9: harvestLeg MUST throw when lat/lng are absent, and harvest.js MUST pass
 the leg's coordinates through. That throw is the only thing guaranteeing the canary's proximity check
 runs, which is the only thing that catches a lat/lng swap. Parked from Task 7; verify it lands.
+BASE for task 10: 8e80718a7a0f021a23ad7d674b070bbe0f6ab733
+BASE for task 11: b2e387a93f028cc913f8f84a30210dccc82f3eed
+BASE for task 12: a18e78d877a16f4691261cd4dd0eb197014658b7
+BASE for task 13: e66221371e41da6e17eaaec1f5989ce983699dd1
+BASE for task 14: c5a543c39f978acae436c18b37328d45603d7f77
