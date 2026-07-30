@@ -182,14 +182,18 @@ export const googlePayloadSource = {
         ]);
       }
 
+      // Keep this page BEFORE deciding whether to stop. These records already cost a
+      // request and a throttle delay, and discarding them on the way out would make
+      // the safety signal itself lose data.
+      leads.push(...pageLeads);
+
       if (Number.isFinite(page.latencyMs) && latency.observe(page.latencyMs)) {
         return finish('blocked', [
-          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms), which is the `
-          + 'earliest sign of rate limiting. Stopping rather than pushing through.',
+          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms across `
+          + `${CONFIG.guard.consecutiveBreachesToHalt} consecutive pages), which is the earliest `
+          + 'sign of rate limiting. Stopping rather than pushing through.',
         ]);
       }
-
-      leads.push(...pageLeads);
 
       // Enforce the cap on RECORDS, not on the offset. Paging by 20 up to an
       // offset of 247 admits 13 full pages, which is 260 records, so the cap was

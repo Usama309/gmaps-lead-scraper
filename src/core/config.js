@@ -58,6 +58,17 @@ export const CONFIG = deepFreeze({
     // An absolute ceiling, so a high baseline cannot switch detection off
     // altogether. Recon saw 980 ms normally and 2.2 s under burst.
     absoluteLatencyCeilingMs: 15000,
+    // Below this, latency variation is ordinary noise rather than pressure. Without
+    // it, a leg whose first pages happened to be fast set a baseline near 160 ms and
+    // then treated recon's own NORMAL 980 ms as a breach. Set above recon's observed
+    // burst figure of 2.2 s and well above its 980 ms baseline, so a genuinely
+    // degraded multi-second response still counts.
+    latencyPressureFloorMs: 3000,
+    // Consecutive breaching samples required before acting. One stalled request is
+    // a hiccup; three in a row is a trend. The counter resets on any sample below
+    // the floor, so a single spike cannot accumulate its way to a halt through a
+    // slowly decaying average.
+    consecutiveBreachesToHalt: 3,
   },
 
   enrich: {

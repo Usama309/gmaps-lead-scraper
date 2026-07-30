@@ -86,9 +86,11 @@ export function nextDelayMs(random = Math.random) {
  */
 export function createLatencyWatch() {
   const {
-    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, baselineFloorMs,
-    absoluteLatencyCeilingMs,
+    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
+    latencyPressureFloorMs, consecutiveBreachesToHalt,
   } = CONFIG.guard;
+
+  let consecutiveBreaches = 0;
 
   const warmup = [];
   let baseline = null;
@@ -121,13 +123,32 @@ export function createLatencyWatch() {
         // The second smallest is robust to one anomaly in either direction and
         // estimates unloaded latency, which is what a pressure signal needs.
         const sorted = [...warmup].sort((a, b) => a - b);
-        baseline = Math.max(sorted[1] ?? sorted[0], baselineFloorMs);
+        baseline = Math.max(sorted[1] ?? sorted[0], CONFIG.guard.baselineFloorMs);
       }
 
       // The absolute ceiling is load-bearing, not a backstop. When the warmup
       // window is itself contaminated by a slowdown, no relative comparison can
       // help, and this is the only thing left that fires.
-      return ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
+
+      // Two gates before anything counts as pressure, because this signal now halts
+      // a run rather than merely logging.
+      //
+      // The RAW sample must clear an absolute floor. Judging on the smoothed average
+      // alone let one 30 second stall keep the average elevated for several samples,
+      // accumulating consecutive "breaches" from a single hiccup.
+      //
+      // Then it must be either well above this leg's own baseline, or past the
+      // ceiling that catches a run slow from its very first page.
+      const elevated = ms > latencyPressureFloorMs;
+      const abnormal = ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
+
+      if (!elevated || !abnormal) {
+        consecutiveBreaches = 0;
+        return false;
+      }
+
+      consecutiveBreaches += 1;
+      return consecutiveBreaches >= consecutiveBreachesToHalt;
     },
   };
 }

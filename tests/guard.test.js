@@ -126,13 +126,51 @@ test('a slowdown beginning during warmup breaches on the relative check alone', 
   // which is what makes this case separating rather than merely slow.
   const watch = createLatencyWatch();
   let breached = false;
-  for (const ms of [900, 900, 4000, 4000, 4000, 4000, 4000, 4000]) {
+  // Long enough for the smoothed average to converge and then clear the streak
+  // requirement. A halt now takes several consecutive elevated samples rather than
+  // one, because it stops the whole run.
+  for (const ms of [900, 900, ...Array(14).fill(4000)]) {
     breached = watch.observe(ms) || breached;
   }
   assert.ok(4000 < CONFIG.guard.absoluteLatencyCeilingMs,
     'this case only separates while it stays under the ceiling');
+  assert.ok(4000 > CONFIG.guard.latencyPressureFloorMs,
+    'and only counts while it clears the noise floor');
   assert.equal(breached, true,
     'a slowdown starting during warmup must still register as pressure');
+});
+
+test('REGRESSION: a fast opening does not make normal latency look like pressure', () => {
+  // Wiring this watch to halt a run introduced a false positive. A leg whose first
+  // pages were quick set a baseline near 160ms, after which recon's own NORMAL
+  // 980ms cleared the 4x threshold and stopped the harvest.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [150, 180, 160, 900, 950, 980, 980, 980, 980, 980, 980, 980, 980]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'sub-second responses are never pressure');
+});
+
+test('REGRESSION: one stalled request does not end a healthy harvest', () => {
+  // A single 30 second stall kept the smoothed average elevated for several
+  // samples, so it accumulated consecutive breaches on its own and halted a run
+  // that was fine.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [980, 980, 980, 980, 980, 30000, 980, 980, 980, 980, 980, 980]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'one hiccup is not a trend');
+});
+
+test('a genuinely sustained slowdown still halts', () => {
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [900, 950, 1000, 980, 900, ...Array(10).fill(20000)]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, true, 'sustained multi-second responses are pressure');
 });
 
 test('the absolute ceiling covers a slowdown that begins during warmup', () => {
