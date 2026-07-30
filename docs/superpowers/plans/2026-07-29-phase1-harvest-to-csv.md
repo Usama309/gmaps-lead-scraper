@@ -3761,7 +3761,7 @@ test('planLegs caps total legs so a job cannot run away', () => {
 function fakeSource(perLeg, stopReason = 'end_of_list') {
   return {
     id: 'fake',
-    async harvestLeg({ query }) {
+    async harvestLeg() {
       return {
         leads: perLeg.map((n) => makeLead({ cid: `0x${n}:0x${n}`, name: `B${n}`, phone: '+92 1' })),
         stopReason,
@@ -3799,7 +3799,11 @@ test('runHarvest stops the whole job when a leg reports a block', async () => {
   });
   assert.equal(result.stopReason, 'blocked');
   assert.equal(called, 1, 'a block must halt the queue, not continue to the next leg');
-  assert.deepEqual(result.problems, ['HTTP 429']);
+  // Problems carry the leg id, so a multi-leg run tells the operator WHICH query
+  // was refused rather than just that something was.
+  assert.equal(result.problems.length, 1);
+  assert.match(result.problems[0], /HTTP 429/);
+  assert.match(result.problems[0], /^leg /);
 });
 
 test('runHarvest stops the whole job when the canary fails', async () => {
@@ -3838,6 +3842,140 @@ test('a leg that throws does not discard leads from completed legs', async () =>
   assert.equal(result.stopReason, 'leg_threw');
   assert.equal(result.leads.length, 1, 'the completed leg must survive');
   assert.ok(result.problems.some((p) => /socket hang up/.test(p)));
+});
+
+test('CRITICAL: a malformed leg result does not destroy completed work', async () => {
+  // The try used to wrap only the call, so reading .leads off undefined escaped
+  // it. A malformed return damages exactly as much as a throw.
+  for (const bad of [undefined, null, { stopReason: 'end_of_list' }, { leads: 'oops', stopReason: 'end_of_list' }]) {
+    const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+    let n = 0;
+    const result = await runHarvest({
+      legs, pb: '!7i20!8i0',
+      source: {
+        id: 'fake',
+        async harvestLeg() {
+          n += 1;
+          if (n === 1) {
+            return { leads: [makeLead({ cid: '0x1:0x1', name: 'Survivor', phone: '+92 1' })],
+              stopReason: 'end_of_list', problems: [] };
+          }
+          return bad;
+        },
+      },
+      delay: async () => {},
+    });
+    assert.equal(result.stopReason, 'leg_threw', `bad result ${JSON.stringify(bad)}`);
+    assert.equal(result.leads.length, 1, 'the completed leg must survive a malformed one');
+  }
+});
+
+test('CRITICAL: a leads value that is a string is rejected, not iterated per character', () => {
+  // Silently worse than a crash: it inserts single characters as leads and
+  // reports success.
+  return runHarvest({
+    legs: planLegs({ keywords: ['a'], ...CENTRE, radiusKm: 2 }).legs,
+    pb: '!7i20!8i0',
+    source: { id: 'fake', async harvestLeg() { return { leads: 'oops', stopReason: 'end_of_list', problems: [] }; } },
+    delay: async () => {},
+  }).then((result) => {
+    assert.equal(result.stopReason, 'leg_threw');
+    assert.equal(result.leads.length, 0, 'characters must not become leads');
+  });
+});
+
+test('CRITICAL: an unknown stopReason is rejected rather than read as success', async () => {
+  const { legs } = planLegs({ keywords: ['a'], ...CENTRE, radiusKm: 2 });
+  const result = await runHarvest({
+    legs, pb: '!7i20!8i0',
+    source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'totally_bogus', problems: [] }; } },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'leg_threw');
+  assert.ok(result.problems.some((p) => /unknown stopReason/.test(p)));
+});
+
+test('CRITICAL: a halted leg is retried on resume, not skipped forever', async () => {
+  // completedLegs used to advance before the halt check, so a blocked leg was
+  // recorded as done. Resuming from it skipped that leg permanently.
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const blocked = await runHarvest({
+    legs, pb: '!7i20!8i0',
+    source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'blocked', problems: ['HTTP 429'] }; } },
+    delay: async () => {},
+  });
+  assert.equal(blocked.stopReason, 'blocked');
+  assert.equal(blocked.completedLegs, 0, 'the blocked leg must NOT be counted as completed');
+
+  const queried = [];
+  await runHarvest({
+    legs, pb: '!7i20!8i0', startAt: blocked.completedLegs,
+    source: {
+      id: 'fake',
+      async harvestLeg({ query }) { queried.push(query); return { leads: [], stopReason: 'end_of_list', problems: [] }; },
+    },
+    delay: async () => {},
+  });
+  assert.equal(queried[0], legs[0].query, 'resume must retry the leg that was blocked');
+});
+
+test('problems from every leg are carried out, not only halting ones', async () => {
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+  const result = await runHarvest({
+    legs, pb: '!7i20!8i0',
+    source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] }; } },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.ok(result.problems.length >= 2, `a degraded run must not look clean: ${JSON.stringify(result.problems)}`);
+  assert.ok(result.problems.every((p) => /ECONNRESET/.test(p)));
+});
+
+test('onLeads receives only newly seen leads, never duplicates', async () => {
+  // Legs overlap by design, so passing the raw list would make a streaming
+  // consumer write the same business more than once.
+  const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
+  const shared = makeLead({ cid: '0xA:0xA', name: 'Shared', phone: '+92 1' });
+  const only = makeLead({ cid: '0xB:0xB', name: 'Only', phone: '+92 2' });
+  const emitted = [];
+  await runHarvest({
+    legs, pb: '!7i20!8i0',
+    onLeads: (batch) => emitted.push(...batch.map((l) => l.name)),
+    source: {
+      id: 'fake',
+      async harvestLeg() { return { leads: [shared, only], stopReason: 'end_of_list', problems: [] }; },
+    },
+    delay: async () => {},
+  });
+  assert.deepEqual(emitted, ['Shared', 'Only'], `emitted ${JSON.stringify(emitted)}`);
+});
+
+test('runHarvest rejects an out-of-range startAt instead of reporting empty success', async () => {
+  const { legs } = planLegs({ keywords: ['a'], ...CENTRE, radiusKm: 2 });
+  const src = { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'end_of_list', problems: [] }; } };
+  for (const startAt of [-1, 1.5, legs.length + 1, '0', null]) {
+    await assert.rejects(
+      () => runHarvest({ legs, pb: '!7i20!8i0', source: src, startAt, delay: async () => {} }),
+      /startAt/, `startAt ${JSON.stringify(startAt)} should be rejected`
+    );
+  }
+});
+
+test('runHarvest rejects a malformed source up front rather than as a leg failure', async () => {
+  const { legs } = planLegs({ keywords: ['a'], ...CENTRE, radiusKm: 2 });
+  for (const bad of [null, {}, { id: 'x' }, { id: 'x', harvestLeg: 'nope' }]) {
+    await assert.rejects(
+      () => runHarvest({ legs, pb: '!7i20!8i0', source: bad, delay: async () => {} }),
+      /source/, `source ${JSON.stringify(bad)} should be rejected`
+    );
+  }
+});
+
+test('planLegs deduplicates keywords so leg ids stay unique', () => {
+  const { legs } = planLegs({ keywords: ['dentist', 'dentist', '  dentist  ', '   '], ...CENTRE, radiusKm: 2 });
+  const ids = legs.map((l) => l.id);
+  assert.equal(new Set(ids).size, ids.length, 'duplicate keywords must not produce colliding leg ids');
+  assert.equal(legs.length, 1, 'whitespace-only and repeated keywords collapse to one');
 });
 
 test('runHarvest reports progress per leg', async () => {
@@ -3903,7 +4041,40 @@ Create `src/pipeline/harvest.js`:
 import { CONFIG } from '../core/config.js';
 import { planTiles } from './tiling.js';
 import { setPbCentre } from '../sources/google-payload.js';
+import { assertSource, assertStopReason } from '../sources/source.js';
 import { nextDelayMs } from './guard.js';
+
+/**
+ * Reasons that stop the WHOLE job rather than just the current leg.
+ *
+ * All three mean the next leg's data would be untrustworthy: we are being
+ * throttled, the payload shape has drifted, or the operator asked us to stop.
+ * Continuing would produce a partial list that reads as complete.
+ */
+const HALTING_REASONS = Object.freeze(['blocked', 'canary_failed', 'aborted']);
+
+/**
+ * Validate what a source handed back, INSIDE the caller's try/catch.
+ *
+ * A malformed return is as damaging as a throw and was not covered by one: the
+ * try wrapped only the call, so reading `.leads` off undefined escaped it and
+ * destroyed every lead collected so far. A leads value that is a string is worse
+ * still, because it iterates character by character into the dedupe map and
+ * reports success.
+ */
+function assertLegResult(result, leg) {
+  if (!result || typeof result !== 'object') {
+    throw new Error(
+      `leg ${leg.id} returned ${result === null ? 'null' : typeof result} instead of a result object`
+    );
+  }
+  if (!Array.isArray(result.leads)) {
+    throw new Error(
+      `leg ${leg.id} returned leads as ${Array.isArray(result.leads) ? 'array' : typeof result.leads}, expected an array`
+    );
+  }
+  assertStopReason(result.stopReason);
+}
 
 /**
  * Expand a job into a flat queue of legs.
@@ -3913,7 +4084,11 @@ import { nextDelayMs } from './guard.js';
  * geographic tiles and merging on the dedupe key.
  */
 export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiusKm }) {
-  const cleanKeywords = (keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
+  // Deduplicated, because a repeated keyword produces legs with identical ids and
+  // the resume contract addresses legs by index against a list assumed unique.
+  const cleanKeywords = [...new Set(
+    (keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
+  )];
   if (cleanKeywords.length === 0) {
     throw new Error('planLegs requires at least one keyword');
   }
@@ -3973,20 +4148,36 @@ export async function runHarvest({
   startAt = 0,
   delay = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
+  assertSource(source);
+
+  if (!Number.isInteger(startAt) || startAt < 0 || startAt > legs.length) {
+    throw new Error(
+      `runHarvest requires startAt to be an integer within 0..${legs.length}, `
+      + `got ${JSON.stringify(startAt)}. A silent out-of-range resume would harvest `
+      + 'nothing and report success.'
+    );
+  }
+
   const byKey = new Map();
   const problems = [];
   let completedLegs = startAt;
 
+  const finish = (stopReason) => ({
+    leads: [...byKey.values()],
+    stopReason: assertStopReason(stopReason),
+    completedLegs,
+    problems,
+  });
+
   for (let i = startAt; i < legs.length; i += 1) {
-    if (signal?.aborted) {
-      return { leads: [...byKey.values()], stopReason: 'aborted', completedLegs, problems };
-    }
+    if (signal?.aborted) return finish('aborted');
 
     const leg = legs[i];
     const legPb = setPbCentre(pb, { lat: leg.lat, lng: leg.lng, zoom: leg.zoom });
 
-    // Same rule as inside harvestLeg: a throw here would discard every lead from
-    // every leg already completed. One flaky request must not cost the whole run.
+    // The try covers the call AND the shape check, because a malformed return
+    // damages exactly as much as a throw: it would discard every lead from every
+    // leg already completed, each of which cost real network time and throttle delay.
     let result;
     try {
       result = await source.harvestLeg({
@@ -3996,50 +4187,55 @@ export async function runHarvest({
         lng: leg.lng,
         signal,
       });
+      assertLegResult(result, leg);
     } catch (error) {
-      problems.push(`leg ${leg.id} threw: ${error?.message ?? String(error)}`);
-      return {
-        leads: [...byKey.values()],
-        stopReason: 'leg_threw',
-        completedLegs,
-        problems,
-      };
+      problems.push(`leg ${leg.id} failed: ${error?.message ?? String(error)}`);
+      return finish('leg_threw');
     }
 
-    let fresh = 0;
+    const fresh = [];
     for (const lead of result.leads) {
       if (!byKey.has(lead.key)) {
         byKey.set(lead.key, lead);
-        fresh += 1;
+        fresh.push(lead);
       }
     }
 
-    completedLegs = i + 1;
-    if (fresh > 0) onLeads(result.leads);
+    // Every leg's problems are carried out, not just the halting ones. A leg that
+    // hit a network fault still ran, still cost time, and still returned fewer
+    // leads than it should have; swallowing that makes a degraded run look clean.
+    if (result.problems?.length) {
+      problems.push(...result.problems.map((p) => `leg ${leg.id}: ${p}`));
+    }
+
+    // Only the newly seen leads. Legs overlap by design, so passing the raw list
+    // would make a streaming consumer write the same business several times.
+    if (fresh.length > 0) onLeads(fresh);
 
     onProgress({
       legIndex: i,
       totalLegs: legs.length,
       leg,
       legLeads: result.leads.length,
-      freshLeads: fresh,
+      freshLeads: fresh.length,
       uniqueLeads: byKey.size,
       stopReason: result.stopReason,
     });
 
-    if (result.stopReason === 'blocked' || result.stopReason === 'canary_failed') {
-      problems.push(...result.problems);
-      return { leads: [...byKey.values()], stopReason: result.stopReason, completedLegs, problems };
+    // Checked BEFORE completedLegs advances, so a halted leg is retried on resume
+    // rather than skipped. Advancing first meant a blocked leg was recorded as
+    // done and permanently lost from the job.
+    if (HALTING_REASONS.includes(result.stopReason)) {
+      return finish(result.stopReason);
     }
 
-    if (signal?.aborted) {
-      return { leads: [...byKey.values()], stopReason: 'aborted', completedLegs, problems };
-    }
+    completedLegs = i + 1;
 
+    if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
   }
 
-  return { leads: [...byKey.values()], stopReason: 'completed', completedLegs, problems };
+  return finish('completed');
 }
 ```
 
