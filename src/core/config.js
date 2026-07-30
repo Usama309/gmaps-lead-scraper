@@ -48,10 +48,13 @@ export const CONFIG = deepFreeze({
     latencyEwmaAlpha: 0.3,
     // Pause if smoothed latency exceeds this multiple of the baseline.
     latencyBreachMultiple: 4,
-    // The baseline is the median of this many opening samples, not the first one.
+    // The baseline comes from this many opening samples, not from the first one.
     // A single unlucky slow request used to set it permanently and silently
     // disable the entire pressure signal.
     baselineSamples: 5,
+    // Never let the baseline fall below this. One anomalously fast response (a
+    // cached reply) would otherwise make ordinary latency look like a breach.
+    baselineFloorMs: 200,
     // An absolute ceiling, so a high baseline cannot switch detection off
     // altogether. Recon saw 980 ms normally and 2.2 s under burst.
     absoluteLatencyCeilingMs: 15000,

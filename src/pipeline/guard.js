@@ -86,7 +86,8 @@ export function nextDelayMs(random = Math.random) {
  */
 export function createLatencyWatch() {
   const {
-    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
+    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, baselineFloorMs,
+    absoluteLatencyCeilingMs,
   } = CONFIG.guard;
 
   const warmup = [];
@@ -107,15 +108,25 @@ export function createLatencyWatch() {
       if (baseline === null) {
         warmup.push(ms);
         if (warmup.length < baselineSamples) return false;
-        // Median of the opening samples, not the first one. A single unlucky slow
-        // request used to become the permanent baseline, after which nothing could
-        // ever breach and the pressure signal was silently dead.
+
+        // Second smallest of the opening samples, floored.
+        //
+        // Not the first sample: one unlucky slow opening request became the
+        // permanent baseline and nothing could ever breach again.
+        // Not the median either: if the slowdown begins DURING warmup, most
+        // samples are already slow and the median absorbs the very thing we are
+        // trying to detect.
+        // Not the minimum: a single cached fast reply would drag the baseline down
+        // and make ordinary latency look like a breach.
+        // The second smallest is robust to one anomaly in either direction and
+        // estimates unloaded latency, which is what a pressure signal needs.
         const sorted = [...warmup].sort((a, b) => a - b);
-        baseline = sorted[Math.floor(sorted.length / 2)];
+        baseline = Math.max(sorted[1] ?? sorted[0], baselineFloorMs);
       }
 
-      // The absolute ceiling means a legitimately high baseline cannot switch
-      // detection off altogether.
+      // The absolute ceiling is load-bearing, not a backstop. When the warmup
+      // window is itself contaminated by a slowdown, no relative comparison can
+      // help, and this is the only thing left that fires.
       return ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
     },
   };

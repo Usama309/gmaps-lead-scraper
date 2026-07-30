@@ -91,13 +91,38 @@ test('a non-text body classifies as blocked instead of throwing', () => {
 });
 
 test('CRITICAL: one slow first request cannot permanently disable the latency watch', () => {
-  // The baseline used to be the first sample. A slow opening request set it high
-  // forever, after which nothing could breach and the pressure signal was dead.
+  // Deliberately chosen so the OLD behaviour cannot pass. With the baseline set
+  // from the first sample, the threshold would be 30000 x 4 = 120000, which a
+  // sustained 100000 never reaches, so the watch stayed silent forever. Taking
+  // the second smallest of the opening samples puts the baseline near 900, where
+  // a sustained 100000 breaches on the relative check alone.
   const watch = createLatencyWatch();
-  watch.observe(5000);
+  watch.observe(30000);
+  for (let i = 0; i < 4; i += 1) watch.observe(900);
   let breached = false;
-  for (let i = 0; i < 30 && !breached; i += 1) breached = watch.observe(60000);
-  assert.equal(breached, true, 'a sustained 60 second response must breach despite a slow first sample');
+  for (let i = 0; i < 10 && !breached; i += 1) breached = watch.observe(100000);
+  assert.equal(breached, true, 'a slow opening sample must not blind the watch');
+});
+
+test('one anomalously fast response does not drag the baseline down', () => {
+  // The mirror risk of using the minimum: a cached 50 ms reply would make
+  // ordinary latency look like a breach and train the operator to ignore it.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [50, 900, 950, 1000, 980, 1000, 950, 900]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'normal latency after one fast outlier is not pressure');
+});
+
+test('the absolute ceiling covers a slowdown that begins during warmup', () => {
+  // When the warmup window is itself contaminated, no relative comparison can
+  // help, so the ceiling is the only thing that can fire. Documenting that it is
+  // load-bearing rather than a backstop.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (let i = 0; i < 10 && !breached; i += 1) breached = watch.observe(60000);
+  assert.equal(breached, true, 'a uniformly slow run must still breach');
 });
 
 test('the latency watch ignores broken measurements rather than absorbing them', () => {
