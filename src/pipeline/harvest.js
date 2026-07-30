@@ -1,7 +1,40 @@
 import { CONFIG } from '../core/config.js';
 import { planTiles } from './tiling.js';
 import { setPbCentre } from '../sources/google-payload.js';
+import { assertSource, assertStopReason } from '../sources/source.js';
 import { nextDelayMs } from './guard.js';
+
+/**
+ * Reasons that stop the WHOLE job rather than just the current leg.
+ *
+ * All three mean the next leg's data would be untrustworthy: we are being
+ * throttled, the payload shape has drifted, or the operator asked us to stop.
+ * Continuing would produce a partial list that reads as complete.
+ */
+const HALTING_REASONS = Object.freeze(['blocked', 'canary_failed', 'aborted']);
+
+/**
+ * Validate what a source handed back, INSIDE the caller's try/catch.
+ *
+ * A malformed return is as damaging as a throw and was not covered by one: the
+ * try wrapped only the call, so reading `.leads` off undefined escaped it and
+ * destroyed every lead collected so far. A leads value that is a string is worse
+ * still, because it iterates character by character into the dedupe map and
+ * reports success.
+ */
+function assertLegResult(result, leg) {
+  if (!result || typeof result !== 'object') {
+    throw new Error(
+      `leg ${leg.id} returned ${result === null ? 'null' : typeof result} instead of a result object`
+    );
+  }
+  if (!Array.isArray(result.leads)) {
+    throw new Error(
+      `leg ${leg.id} returned leads as ${Array.isArray(result.leads) ? 'array' : typeof result.leads}, expected an array`
+    );
+  }
+  assertStopReason(result.stopReason);
+}
 
 /**
  * Expand a job into a flat queue of legs.
@@ -11,7 +44,11 @@ import { nextDelayMs } from './guard.js';
  * geographic tiles and merging on the dedupe key.
  */
 export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiusKm }) {
-  const cleanKeywords = (keywords ?? []).map((k) => String(k).trim()).filter(Boolean);
+  // Deduplicated, because a repeated keyword produces legs with identical ids and
+  // the resume contract addresses legs by index against a list assumed unique.
+  const cleanKeywords = [...new Set(
+    (keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
+  )];
   if (cleanKeywords.length === 0) {
     throw new Error('planLegs requires at least one keyword');
   }
@@ -71,20 +108,36 @@ export async function runHarvest({
   startAt = 0,
   delay = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
+  assertSource(source);
+
+  if (!Number.isInteger(startAt) || startAt < 0 || startAt > legs.length) {
+    throw new Error(
+      `runHarvest requires startAt to be an integer within 0..${legs.length}, `
+      + `got ${JSON.stringify(startAt)}. A silent out-of-range resume would harvest `
+      + 'nothing and report success.'
+    );
+  }
+
   const byKey = new Map();
   const problems = [];
   let completedLegs = startAt;
 
+  const finish = (stopReason) => ({
+    leads: [...byKey.values()],
+    stopReason: assertStopReason(stopReason),
+    completedLegs,
+    problems,
+  });
+
   for (let i = startAt; i < legs.length; i += 1) {
-    if (signal?.aborted) {
-      return { leads: [...byKey.values()], stopReason: 'aborted', completedLegs, problems };
-    }
+    if (signal?.aborted) return finish('aborted');
 
     const leg = legs[i];
     const legPb = setPbCentre(pb, { lat: leg.lat, lng: leg.lng, zoom: leg.zoom });
 
-    // Same rule as inside harvestLeg: a throw here would discard every lead from
-    // every leg already completed. One flaky request must not cost the whole run.
+    // The try covers the call AND the shape check, because a malformed return
+    // damages exactly as much as a throw: it would discard every lead from every
+    // leg already completed, each of which cost real network time and throttle delay.
     let result;
     try {
       result = await source.harvestLeg({
@@ -94,48 +147,53 @@ export async function runHarvest({
         lng: leg.lng,
         signal,
       });
+      assertLegResult(result, leg);
     } catch (error) {
-      problems.push(`leg ${leg.id} threw: ${error?.message ?? String(error)}`);
-      return {
-        leads: [...byKey.values()],
-        stopReason: 'leg_threw',
-        completedLegs,
-        problems,
-      };
+      problems.push(`leg ${leg.id} failed: ${error?.message ?? String(error)}`);
+      return finish('leg_threw');
     }
 
-    let fresh = 0;
+    const fresh = [];
     for (const lead of result.leads) {
       if (!byKey.has(lead.key)) {
         byKey.set(lead.key, lead);
-        fresh += 1;
+        fresh.push(lead);
       }
     }
 
-    completedLegs = i + 1;
-    if (fresh > 0) onLeads(result.leads);
+    // Every leg's problems are carried out, not just the halting ones. A leg that
+    // hit a network fault still ran, still cost time, and still returned fewer
+    // leads than it should have; swallowing that makes a degraded run look clean.
+    if (result.problems?.length) {
+      problems.push(...result.problems.map((p) => `leg ${leg.id}: ${p}`));
+    }
+
+    // Only the newly seen leads. Legs overlap by design, so passing the raw list
+    // would make a streaming consumer write the same business several times.
+    if (fresh.length > 0) onLeads(fresh);
 
     onProgress({
       legIndex: i,
       totalLegs: legs.length,
       leg,
       legLeads: result.leads.length,
-      freshLeads: fresh,
+      freshLeads: fresh.length,
       uniqueLeads: byKey.size,
       stopReason: result.stopReason,
     });
 
-    if (result.stopReason === 'blocked' || result.stopReason === 'canary_failed') {
-      problems.push(...result.problems);
-      return { leads: [...byKey.values()], stopReason: result.stopReason, completedLegs, problems };
+    // Checked BEFORE completedLegs advances, so a halted leg is retried on resume
+    // rather than skipped. Advancing first meant a blocked leg was recorded as
+    // done and permanently lost from the job.
+    if (HALTING_REASONS.includes(result.stopReason)) {
+      return finish(result.stopReason);
     }
 
-    if (signal?.aborted) {
-      return { leads: [...byKey.values()], stopReason: 'aborted', completedLegs, problems };
-    }
+    completedLegs = i + 1;
 
+    if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
   }
 
-  return { leads: [...byKey.values()], stopReason: 'completed', completedLegs, problems };
+  return finish('completed');
 }
