@@ -2159,6 +2159,76 @@ test('categories, placeId and address are validated, since scoring and export de
   assert.equal(runCanary(broken).ok, false, 'categories as a bare string must abort');
 });
 
+test('a phone and placeId SWAP aborts, since both would otherwise look valid', () => {
+  // The hardest class: two fields exchange values and each still passes a loose
+  // validator. A digit-heavy place ID satisfied "has seven digits" and a phone
+  // number satisfied "is a non-empty string", so the swap was invisible.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const phone = r[178][0][0];
+    r[178][0][0] = r[78];
+    r[78] = phone;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'a phone/placeId exchange must abort');
+  assert.ok(problems.some((p) => /phone|placeId/i.test(p)));
+});
+
+test('a real rating and reviewCount swap aborts on the rating range check', () => {
+  // With genuine values, exchanging the two puts a review count like 87 into the
+  // rating slot, which the 0 to 5 range check rejects outright.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const rating = r[4][7];
+    r[4][7] = r[4][8];
+    r[4][8] = rating;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false);
+  assert.ok(problems.some((p) => /rating/i.test(p)));
+});
+
+test('a swap whose values BOTH stay in range aborts on the ordering invariant', () => {
+  // The genuinely hard case, and the one a reviewer used to break an earlier
+  // version. Both fields stay numeric and both stay inside their own valid range,
+  // so no per-field check and no equality sweep can see it. Only the relation
+  // between them gives it away: a real business has more reviews than its rating
+  // is high, so reviewCount below rating means those indices exchanged.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = 4.5;
+    r[4][8] = 2;
+  }
+  const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'reviewCount below rating on every record is a swap');
+  assert.ok(problems.some((p) => /smaller than rating|swapped/i.test(p)));
+});
+
+test('the ordering invariant tolerates a genuinely tiny business', () => {
+  // A brand new listing with 4 reviews and a 4.0 rating is real, not drift.
+  const tiny = structuredClone(GOOD);
+  const r = tiny[64][0][PAYLOAD_MAP.recordWrapper];
+  r[4][7] = 4.0; r[4][8] = 4;
+  assert.equal(runCanary(tiny, { lat: 33.7609824, lng: 72.342874 }).ok, true);
+});
+
+test('a phone number is rejected in the placeId slot and vice versa', () => {
+  const phoneAsPlaceId = structuredClone(GOOD);
+  for (const entry of phoneAsPlaceId[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][78] = '+92 57 261 2201';
+  }
+  assert.equal(runCanary(phoneAsPlaceId).ok, false, 'a phone must not pass as a place ID');
+
+  const placeIdAsPhone = structuredClone(GOOD);
+  for (const entry of placeIdAsPhone[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][178][0][0] = 'ChIJ1234567890';
+  }
+  assert.equal(runCanary(placeIdAsPhone).ok, false, 'a place ID must not pass as a phone');
+});
+
 test('CANARY_RULES marks name and cid as required, since they are the record identity', () => {
   const required = CANARY_RULES.fields.filter((f) => f.required).map((f) => f.field);
   assert.deepEqual(required.sort(), ['cid', 'name']);
@@ -2303,6 +2373,26 @@ function isNonEmptyString(value) {
 }
 
 /**
+ * A phone number contains only dialling characters. Deliberately strict: a loose
+ * "has seven digits" test also accepts a Google place ID like ChIJ1234567, which
+ * let phone and placeId swap places with both values still looking valid.
+ */
+function looksLikePhone(value) {
+  return typeof value === 'string'
+    && /^[+(]?[\d][\d\s\-().]*$/.test(value.trim())
+    && countDigits(value) >= 7;
+}
+
+/**
+ * A Google place ID starts with a letter and is long. Requiring the leading
+ * letter is what stops a phone number passing as a place ID, closing the other
+ * direction of the same swap.
+ */
+function looksLikePlaceId(value) {
+  return typeof value === 'string' && /^[A-Za-z]/.test(value) && value.trim().length >= 8;
+}
+
+/**
  * What a healthy payload looks like, field by field.
  *
  * Coverage floors sit close to the live measurement (98% phone, 98% rating,
@@ -2353,7 +2443,7 @@ export const CANARY_RULES = Object.freeze({
     }),
     Object.freeze({
       field: 'phone', minAnyValid: true, minCoverage: 0.80,
-      valid: (v) => typeof v === 'string' && countDigits(v) >= 7,
+      valid: looksLikePhone,
       why: 'phone is the field the operator actually dials; measured at 98% live',
     }),
     Object.freeze({
@@ -2383,7 +2473,7 @@ export const CANARY_RULES = Object.freeze({
     }),
     Object.freeze({
       field: 'placeId', minAnyValid: true, minCoverage: 0.80, minUniqueRatio: 0.95,
-      valid: isNonEmptyString,
+      valid: looksLikePlaceId,
       why: 'placeId is the stable Google identifier carried into the export',
     }),
     Object.freeze({
@@ -2492,6 +2582,28 @@ export function runCanary(parsed, expect = {}) {
           + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
         );
       }
+    }
+  }
+
+  // Relational invariants. Two numeric fields can swap places while both remain
+  // individually valid, which no per-field validator and no equality sweep can
+  // see. A real business has far more reviews than its rating is high, so the
+  // ordering between them is a cheap, reliable tell.
+  const paired = records
+    .map((r) => ({
+      rating: at(r, PAYLOAD_MAP.record.rating),
+      reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
+    }))
+    .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
+
+  if (paired.length > 0) {
+    const ordered = paired.filter((v) => v.reviewCount >= v.rating);
+    if (ordered.length < paired.length * 0.9) {
+      problems.push(
+        `reviewCount is smaller than rating on ${paired.length - ordered.length} of `
+        + `${paired.length} records. Real businesses have more reviews than their `
+        + `rating is high, so those two indices have most likely swapped`
+      );
     }
   }
 
@@ -2859,6 +2971,16 @@ test('assertSource rejects an object missing an id', () => {
   assert.throws(() => assertSource({ harvestLeg: () => {} }), /id/);
 });
 
+test('harvestLeg refuses to run without the queried coordinates', async () => {
+  // Without a point to compare against, the canary cannot check proximity, and
+  // proximity is the only thing that catches a latitude/longitude swap. Silently
+  // defaulting to null disabled that protection.
+  await assert.rejects(
+    () => googlePayloadSource.harvestLeg({ query: 'dentist', pb: PB, fetchPage: async () => ({}) }),
+    /lat and lng/i
+  );
+});
+
 test('harvestLeg pages until end_of_list and returns accumulated leads', async () => {
   // Two full pages then an empty one. `fetchPage` is injected so this test
   // never touches the network.
@@ -2871,6 +2993,8 @@ test('harvestLeg pages until end_of_list and returns accumulated leads', async (
   const result = await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
+    lat: 33.7609824,
+    lng: 72.342874,
     fetchPage: async () => pages[call++],
     delay: async () => {},
   });
@@ -2883,6 +3007,8 @@ test('harvestLeg stops immediately on a block and reports it', async () => {
   const result = await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
+    lat: 33.7609824,
+    lng: 72.342874,
     fetchPage: async () => ({ status: 429, body: '' }),
     delay: async () => {},
   });
@@ -2895,6 +3021,8 @@ test('harvestLeg never retries through a block', async () => {
   await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
+    lat: 33.7609824,
+    lng: 72.342874,
     fetchPage: async () => { calls += 1; return { status: 429, body: '' }; },
     delay: async () => {},
   });
@@ -2905,6 +3033,8 @@ test('harvestLeg respects the per query cap', async () => {
   const result = await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
+    lat: 33.7609824,
+    lng: 72.342874,
     fetchPage: async () => ({ status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) }),
     delay: async () => {},
   });
@@ -2921,7 +3051,7 @@ test('harvestLeg treats total extraction failure as drift, not a finished leg', 
   });
   let call = 0;
   const result = await googlePayloadSource.harvestLeg({
-    query: 'dentist', pb: PB,
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
     fetchPage: async () => {
       call += 1;
       return call === 1
@@ -2939,6 +3069,8 @@ test('harvestLeg aborts when the canary fails on the first page', async () => {
   const result = await googlePayloadSource.harvestLeg({
     query: 'dentist',
     pb: PB,
+    lat: 33.7609824,
+    lng: 72.342874,
     fetchPage: async () => ({ status: 200, body: ")]}'\n" + JSON.stringify(drifted) }),
     delay: async () => {},
   });
@@ -2964,7 +3096,7 @@ function payloadWith(count) {
     r[178] = [[`+92 57 261 ${(1000 + i).toString().padStart(4, '0')}`]];
     r[9] = (() => { const a = []; a[2] = 33.76 + i * 0.001; a[3] = 72.34 + i * 0.001; return a; })();
     r[13] = ['Dentist'];
-    r[78] = `ChIJFake${i}`;
+    r[78] = `ChIJFakePlace${i}`;
     r[18] = `Street ${i}, Attock, Punjab`;
     records.push([null, r]);
   }
@@ -3090,13 +3222,20 @@ export const googlePayloadSource = {
   async harvestLeg({
     query,
     pb,
-    lat = null,
-    lng = null,
+    // Required, not optional. The canary's proximity check is the only thing that
+    // catches a latitude/longitude swap, and it can only run with a point to
+    // compare against. Defaulting these to null silently disabled it.
+    lat,
+    lng,
     onPage = () => {},
     signal = null,
     fetchPage = defaultFetchPage,
     delay = (ms) => new Promise((r) => setTimeout(r, ms)),
   }) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new Error('harvestLeg requires the queried lat and lng so the canary can verify record proximity');
+    }
+
     const leads = [];
     let offset = 0;
     let canaryChecked = false;
