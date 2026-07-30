@@ -3,6 +3,15 @@
  * leaf of the import graph and every other core module may import it.
  */
 
+/**
+ * Decimal places used when coordinates form part of a dedupe key.
+ * This lives here rather than in config.js because it is an algorithm constant,
+ * not an operational tunable. Changing it silently invalidates every dedupe key
+ * already written to IndexedDB, so it must not sit next to knobs like throttle
+ * delays that someone may reasonably tune.
+ */
+export const COORD_KEY_DECIMALS = 4;
+
 export function normalizeName(value) {
   if (!value) return '';
   return String(value)
@@ -47,7 +56,7 @@ export function leadKey(lead) {
   if (name && phone) return `np:${name}|${phone}`;
 
   if (name && Number.isFinite(lead.lat) && Number.isFinite(lead.lng)) {
-    return `nl:${name}|${lead.lat.toFixed(4)}|${lead.lng.toFixed(4)}`;
+    return `nl:${name}|${lead.lat.toFixed(COORD_KEY_DECIMALS)}|${lead.lng.toFixed(COORD_KEY_DECIMALS)}`;
   }
 
   throw new Error('cannot derive a dedupe key: lead has no cid, no name+phone, no name+coords');
