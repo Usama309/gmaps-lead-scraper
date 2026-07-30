@@ -55,3 +55,18 @@ scoped the mockup's chip handler to skip `[data-tech]` chips (owned by `dashboar
 removed its `#e-go` handler entirely. Zero HTML or CSS changed; every ID, class and visible
 layout is exactly the approved mockup. Category typeahead, location-mode toggle, export-format
 toggle and sort-arrow display, none of which conflict with `dashboard.js`, were left untouched.
+
+## ADR-006: Export is confirmed by the dashboard, not by the worker that builds the CSV
+**Date:** 2026-07-30
+**Decision:** `MSG.EXPORT` builds the CSV and returns the affected keys without recording
+anything. A separate `MSG.CONFIRM_EXPORT` records them, sent by the dashboard only after
+`anchor.click()` has fired. `markExported` has exactly one call site, inside `confirmExport`.
+**Why:** Marking inside the same round-trip that built the CSV flagged businesses as exported
+before the dashboard had even received the response, let alone constructed the Blob and
+triggered the download. A blocked download, a cancelled save dialog, or an anchor click that
+no-ops would then skip those businesses on every future sweep, with no error raised and no way
+for the operator to learn which ones vanished. Silent permanent data loss is the worst failure
+mode this tool has, because the operator cannot detect it from the output.
+**Consequence:** The confirmation can still be lost if the page closes between the click and the
+confirm, but that direction fails safe: the lead is exported again next time rather than never.
+Preferring duplicate work over silent omission is the right bias for a lead list.

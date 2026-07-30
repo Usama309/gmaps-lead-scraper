@@ -17,8 +17,22 @@ function stripeColor(score) {
   return 'var(--sorted)';
 }
 
+/**
+ * Escape for HTML. Covers quotes as well as angle brackets.
+ *
+ * Nothing here currently lands inside a quoted attribute, so quote escaping is not
+ * load-bearing today. It is included because the day someone writes
+ * href="${esc(d.website)}" this becomes the only thing between a business name and
+ * script execution in the extension's own privileged origin, and that edit will not
+ * come with a reminder. Lead data comes from Maps listings, which anyone can register.
+ */
 function esc(text) {
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function renderRows(leads) {
@@ -77,14 +91,31 @@ function renderStats(leads, totalStored) {
   $('#e-count').textContent = leads.length;
 }
 
+function showError(message) {
+  const toast = $('#e-toast');
+  toast.textContent = message;
+  toast.classList.add('on');
+}
+
+function clearError() {
+  $('#e-toast').classList.remove('on');
+}
+
 async function refresh() {
   try {
     const { leads, totalStored } = await send(MSG.GET_LEADS, state);
+    clearError();
     renderRows(leads);
     renderStats(leads, totalStored);
   } catch (error) {
-    $('#e-toast').textContent = error.message;
-    $('#e-toast').classList.add('on');
+    // Clear the table as well as showing the message. Leaving the previous rows
+    // and counts under an error toast lets the operator read stale numbers as
+    // current ones, which is worse than showing nothing.
+    $('#mp-rows').innerHTML =
+      '<tr><td colspan="11" style="padding:26px;text-align:center;color:var(--ink-3)">'
+      + 'Could not reach the extension. The counts below are cleared rather than left stale.</td></tr>';
+    renderStats([], 0);
+    showError(error.message);
   }
 }
 
@@ -119,8 +150,18 @@ function bind() {
     $('#f-scoreval').textContent = state.minScore;
     refresh();
   });
-  $('#f-minrev').addEventListener('input', (e) => { state.minReviews = Number(e.target.value) || 0; refresh(); });
-  $('#f-maxrev').addEventListener('input', (e) => { state.maxReviews = Number(e.target.value) || Infinity; refresh(); });
+  // Parsed explicitly rather than with `|| fallback`, because 0 is falsy: typing a
+  // max of 0 meant "no limit" instead of "cap at zero", which is the opposite.
+  const numberOr = (raw, fallback) => {
+    const value = Number(raw);
+    return raw.trim() === '' || !Number.isFinite(value) ? fallback : value;
+  };
+  $('#f-minrev').addEventListener('input', (e) => {
+    state.minReviews = numberOr(e.target.value, 0); refresh();
+  });
+  $('#f-maxrev').addEventListener('input', (e) => {
+    state.maxReviews = numberOr(e.target.value, Infinity); refresh();
+  });
   $('#f-lastrev').addEventListener('change', (e) => { state.lastReviewWithinDays = Number(e.target.value); refresh(); });
   $('#f-rating').addEventListener('change', (e) => { state.minRating = Number(e.target.value); refresh(); });
   $('#f-dupe').addEventListener('change', (e) => { state.skipExported = e.target.checked; refresh(); });
@@ -128,18 +169,26 @@ function bind() {
   $('#e-go').addEventListener('click', async () => {
     const toast = $('#e-toast');
     try {
-      const { csv, count, filename } = await send(MSG.EXPORT, state);
+      const { csv, count, keys, filename } = await send(MSG.EXPORT, state);
       const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
       const anchor = Object.assign(document.createElement('a'), { href: url, download: filename });
       anchor.click();
       URL.revokeObjectURL(url);
+
+      // Only now record them as exported. Confirming before the download exists
+      // would permanently skip these businesses on every later sweep if the save
+      // never happened, and nothing would tell the operator which ones went.
+      await send(MSG.CONFIRM_EXPORT, { keys });
+
       toast.textContent = `→ exported ${count} leads`;
+      toast.classList.add('on');
+      setTimeout(() => toast.classList.remove('on'), 3000);
       await refresh();
     } catch (error) {
-      toast.textContent = error.message;
+      // Errors persist until the next successful refresh clears them, rather than
+      // fading after three seconds like a success message.
+      showError(error.message);
     }
-    toast.classList.add('on');
-    setTimeout(() => toast.classList.remove('on'), 3000);
   });
 }
 

@@ -8,6 +8,11 @@ export const MSG = Object.freeze({
   ABORT_RUN: 'mapprospector/abort-run',
   GET_LEADS: 'mapprospector/get-leads',
   EXPORT: 'mapprospector/export',
+  // Split from EXPORT deliberately. EXPORT builds the CSV and marks nothing;
+  // CONFIRM_EXPORT is sent only once the download has actually been triggered.
+  // Marking inside EXPORT meant a blocked or cancelled download still flagged
+  // those businesses as exported, silently skipping them on every later sweep.
+  CONFIRM_EXPORT: 'mapprospector/confirm-export',
   RUN_PROGRESS: 'mapprospector/run-progress',
   RUN_BLOCKED: 'mapprospector/run-blocked',
 });

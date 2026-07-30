@@ -45,5 +45,21 @@
   leads exported. It now states that the leads are real and that exporting records them so the
   next sweep can skip them.
 
+- [2026-07-30 03:00 PM] Split export confirmation from CSV generation. `MSG.EXPORT` now returns
+  the keys and marks nothing; the new `MSG.CONFIRM_EXPORT` records them, and the dashboard sends
+  it only after the download has actually been triggered. Previously a blocked or cancelled
+  download still flagged those businesses as exported, silently skipping them on every later sweep
+- [2026-07-30 03:00 PM] Closed a time-of-check to time-of-use window in the run guard. The
+  `activeRun` slot is now claimed synchronously before the first await, so two fast clicks cannot
+  both pass the check and start concurrent pipelines against the shared dedupe store. The side
+  panel also disables Start for the duration of a run
+- [2026-07-30 03:00 PM] `esc()` in `dashboard.js` now escapes single and double quotes as well as
+  angle brackets, hardening it before anything lands inside a quoted attribute
+- [2026-07-30 03:00 PM] A failed dashboard refresh now clears the table and zeroes the stats
+  instead of leaving stale numbers readable under an error toast, and errors persist until the
+  next successful refresh rather than fading like a success message
+- [2026-07-30 03:00 PM] Review-count inputs parse explicitly, so a maximum of 0 means zero rather
+  than no limit. `Number(v) || Infinity` treated the valid value 0 as absent
+
 ### Removed
 - [2026-07-30 01:30 PM] Unused `currentLeads` variable in `dashboard.js`, written but never read

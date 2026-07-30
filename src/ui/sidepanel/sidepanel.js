@@ -8,7 +8,15 @@ const write = (text, warn = false) => {
   log.prepend(line);
 };
 
-document.getElementById('run').addEventListener('click', async () => {
+const runButton = document.getElementById('run');
+
+runButton.addEventListener('click', async () => {
+  // Disabled for the duration. The worker also refuses a second run, but a guard
+  // there cannot stop the operator queueing clicks, and a disabled button says
+  // plainly that something is already happening.
+  if (runButton.disabled) return;
+  runButton.disabled = true;
+
   const config = {
     keywords: document.getElementById('kw').value.split(',').map((k) => k.trim()).filter(Boolean),
     lat: Number(document.getElementById('lat').value),
@@ -19,6 +27,8 @@ document.getElementById('run').addEventListener('click', async () => {
 
   write(`starting: ${config.keywords.join(', ')} within ${config.radiusKm} km`);
   const response = await chrome.runtime.sendMessage(makeRequest(MSG.START_RUN, config));
+
+  runButton.disabled = false;
 
   if (!response.ok) { write(response.error, true); return; }
 

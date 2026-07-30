@@ -43,26 +43,40 @@ function broadcast(type, payload) {
   });
 }
 
+/**
+ * Start a harvest. One run at a time.
+ *
+ * The slot is claimed SYNCHRONOUSLY, before the first await. The check and the
+ * claim used to be separated by two awaits, which is a real time-of-check to
+ * time-of-use window: two fast clicks could both pass `if (activeRun)` while the
+ * first was still suspended, and start concurrent pipelines against one shared
+ * dedupe store. Nothing else can run between the check and the first suspension
+ * point, so claiming here closes it. The `finally` releases the slot on every
+ * path out, including a failed pb lookup, so a rejected start cannot wedge the
+ * worker into refusing all later runs.
+ */
 async function startRun(config) {
   if (activeRun) throw new Error('a run is already in progress');
 
-  const pb = await recallPb();
-  if (!pb) {
-    throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
-  }
-
-  const { legs, coverage } = planLegs(config);
   const controller = new AbortController();
   const runId = `run-${Date.now()}`;
-
-  // Serialises every store write for this run, so they land in order and can be
-  // drained before the run reports done.
-  let pendingWrites = Promise.resolve();
-
-  activeRun = { runId, controller, legs };
-  await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
+  activeRun = { runId, controller, legs: [] };
 
   try {
+    const pb = await recallPb();
+    if (!pb) {
+      throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
+    }
+
+    const { legs, coverage } = planLegs(config);
+    activeRun.legs = legs;
+
+    // Serialises every store write for this run, so they land in order and can be
+    // drained before the run reports done.
+    let pendingWrites = Promise.resolve();
+
+    await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
+
     const result = await runHarvest({
       legs,
       pb,
@@ -121,11 +135,33 @@ async function getLeads(filterState) {
   return { leads: filterLeads(leads, { ...filterState, exportedKeys }), totalStored: leads.length };
 }
 
+/**
+ * Build the CSV and return it with the keys it covers. Marks NOTHING as exported.
+ *
+ * Marking here would flag these businesses before the dashboard had even received
+ * the response, let alone built the Blob and triggered the download. A blocked
+ * download, a cancelled save dialog, or an anchor click that silently no-ops would
+ * then leave them permanently skipped on every later sweep, with no error raised
+ * and no way for the operator to learn which ones went missing. The dashboard
+ * sends CONFIRM_EXPORT once the download has actually been triggered.
+ */
 async function exportLeads(filterState) {
   const { leads } = await getLeads(filterState);
   const csv = toCsv(leads);
-  await markExported(leads.map((l) => l.key));
-  return { csv, count: leads.length, filename: `mapprospector-${Date.now()}.csv` };
+  return {
+    csv,
+    count: leads.length,
+    keys: leads.map((l) => l.key),
+    filename: `mapprospector-${Date.now()}.csv`,
+  };
+}
+
+/** Record an export that actually reached the operator. The only caller of markExported. */
+async function confirmExport(payload) {
+  const keys = payload?.keys;
+  if (!Array.isArray(keys)) throw new Error('confirm-export needs the keys array from the export');
+  await markExported(keys);
+  return { confirmed: keys.length };
 }
 
 const HANDLERS = {
@@ -138,6 +174,7 @@ const HANDLERS = {
   },
   [MSG.GET_LEADS]: (payload) => getLeads(payload ?? {}),
   [MSG.EXPORT]: (payload) => exportLeads(payload ?? {}),
+  [MSG.CONFIRM_EXPORT]: (payload) => confirmExport(payload ?? {}),
 };
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
