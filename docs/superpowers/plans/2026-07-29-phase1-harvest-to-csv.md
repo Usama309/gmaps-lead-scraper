@@ -457,8 +457,15 @@ export const CONFIG = deepFreeze({
     validPrefix: ")]}'",
     blockedStatuses: [302, 429, 403, 503],
     latencyEwmaAlpha: 0.3,
-    // Pause if smoothed latency exceeds this multiple of the first observed latency.
+    // Pause if smoothed latency exceeds this multiple of the baseline.
     latencyBreachMultiple: 4,
+    // The baseline is the median of this many opening samples, not the first one.
+    // A single unlucky slow request used to set it permanently and silently
+    // disable the entire pressure signal.
+    baselineSamples: 5,
+    // An absolute ceiling, so a high baseline cannot switch detection off
+    // altogether. Recon saw 980 ms normally and 2.2 s under burst.
+    absoluteLatencyCeilingMs: 15000,
   },
 
   enrich: {
@@ -2758,7 +2765,7 @@ test('an empty body is blocked', () => {
 
 test('THE TRAP: a valid response with zero records is end_of_list, never blocked', () => {
   const transport = classifyTransport({ status: 200, body: VALID });
-  const page = classifyPage({ transport, recordCount: 0 });
+  const page = classifyPage({ transport, recordCount: 0, rawCount: 0 });
   assert.equal(page.state, 'end_of_list');
   assert.match(page.reason, /end of/i);
 });
@@ -2777,8 +2784,78 @@ test('THE OTHER TRAP: records that arrived but all failed extraction is drift, n
 
 test('a blocked transport stays blocked regardless of record count', () => {
   const transport = classifyTransport({ status: 429, body: '' });
-  assert.equal(classifyPage({ transport, recordCount: 0 }).state, 'blocked');
-  assert.equal(classifyPage({ transport, recordCount: 20 }).state, 'blocked');
+  assert.equal(classifyPage({ transport, recordCount: 0, rawCount: 0 }).state, 'blocked');
+  assert.equal(classifyPage({ transport, recordCount: 20, rawCount: 20 }).state, 'blocked');
+});
+
+test('CRITICAL: classifyPage refuses to guess a missing rawCount', () => {
+  // rawCount used to default to 0, so a caller forgetting it turned a drift back
+  // into end_of_list: the exact silent truncation this module prevents, brought
+  // back by one omitted argument. Absence is a caller bug and must be loud.
+  const transport = classifyTransport({ status: 200, body: VALID });
+  assert.throws(() => classifyPage({ transport, recordCount: 0 }), /rawCount/);
+  assert.throws(() => classifyPage({ transport, rawCount: 20 }), /recordCount/);
+});
+
+test('classifyPage rejects malformed counts instead of reporting healthy', () => {
+  const transport = classifyTransport({ status: 200, body: VALID });
+  for (const bad of [NaN, -1, 1.5, '0', null, undefined]) {
+    assert.throws(() => classifyPage({ transport, recordCount: bad, rawCount: 20 }),
+      /recordCount/, `recordCount ${JSON.stringify(bad)} should be rejected`);
+    assert.throws(() => classifyPage({ transport, recordCount: 0, rawCount: bad }),
+      /rawCount/, `rawCount ${JSON.stringify(bad)} should be rejected`);
+  }
+});
+
+test('classifyPage rejects an impossible recordCount above rawCount', () => {
+  // Extraction can only ever lose records, never invent them, so this is a
+  // caller bug worth surfacing rather than absorbing.
+  const transport = classifyTransport({ status: 200, body: VALID });
+  assert.throws(() => classifyPage({ transport, recordCount: 25, rawCount: 20 }), /cannot happen/);
+});
+
+test('a non-text body classifies as blocked instead of throwing', () => {
+  // A Buffer is realistic from a Node HTTP path. A guard that throws escapes the
+  // state machine it exists to enforce, leaving the caller with no state to act on.
+  for (const body of [200, {}, [], true, Buffer.from(VALID)]) {
+    const t = classifyTransport({ status: 200, body });
+    assert.equal(t.state, 'blocked', `body ${typeof body} should classify, not throw`);
+    assert.match(t.reason, /not text/);
+  }
+});
+
+test('CRITICAL: one slow first request cannot permanently disable the latency watch', () => {
+  // The baseline used to be the first sample. A slow opening request set it high
+  // forever, after which nothing could breach and the pressure signal was dead.
+  const watch = createLatencyWatch();
+  watch.observe(5000);
+  let breached = false;
+  for (let i = 0; i < 30 && !breached; i += 1) breached = watch.observe(60000);
+  assert.equal(breached, true, 'a sustained 60 second response must breach despite a slow first sample');
+});
+
+test('the latency watch ignores broken measurements rather than absorbing them', () => {
+  // A zero made the next request look infinitely slower; a negative produced an
+  // instant false breach.
+  const zeroFirst = createLatencyWatch();
+  assert.equal(zeroFirst.observe(0), false);
+  assert.equal(zeroFirst.observe(900), false, 'a zero must not become the baseline');
+
+  const negativeFirst = createLatencyWatch();
+  assert.equal(negativeFirst.observe(-500), false);
+  assert.equal(negativeFirst.observe(900), false, 'a negative must not trigger a breach');
+
+  const nan = createLatencyWatch();
+  assert.equal(nan.observe(NaN), false);
+});
+
+test('a modestly slower baseline is not treated as pressure', () => {
+  // 6 seconds against a 5 second baseline is slow but not a signal. Flagging it
+  // would teach the operator to ignore the warning.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (let i = 0; i < 20; i += 1) breached = watch.observe(i === 0 ? 5000 : 6000) || breached;
+  assert.equal(breached, false);
 });
 
 test('nextDelayMs stays inside the configured range', () => {
@@ -2837,6 +2914,12 @@ export function classifyTransport({ status, body }) {
   if (!body) {
     return { state: 'blocked', reason: 'empty response body' };
   }
+  // A non-text body (a Buffer from a Node HTTP path, an object, a number) must
+  // classify rather than throw. A guard that throws escapes the state machine it
+  // exists to enforce, and the caller has no state to act on.
+  if (typeof body !== 'string') {
+    return { state: 'blocked', reason: `response body was ${typeof body}, not text` };
+  }
   if (!body.startsWith(CONFIG.guard.validPrefix)) {
     return { state: 'blocked', reason: 'response is missing the payload prefix, likely a challenge page' };
   }
@@ -2852,7 +2935,24 @@ export function classifyTransport({ status, body }) {
  * Treating a real block as end-of-list would silently truncate results and the
  * operator would never know the list was incomplete.
  */
-export function classifyPage({ transport, recordCount, rawCount = 0 }) {
+export function classifyPage({ transport, recordCount, rawCount }) {
+  // Both counts are REQUIRED and validated, deliberately. rawCount previously
+  // defaulted to 0, which meant a caller forgetting to pass it turned a drift
+  // straight back into end_of_list: the exact silent truncation this module
+  // exists to prevent, reintroduced by one omitted argument. Only the caller
+  // knows whether records arrived, so absence is a bug and must be loud.
+  for (const [name, value] of [['recordCount', recordCount], ['rawCount', rawCount]]) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`classifyPage requires a non-negative integer ${name}, got ${JSON.stringify(value)}`);
+    }
+  }
+  if (recordCount > rawCount) {
+    throw new Error(
+      `classifyPage got recordCount ${recordCount} above rawCount ${rawCount}, `
+      + 'which cannot happen: extraction can only ever lose records, never invent them'
+    );
+  }
+
   if (transport.state === 'blocked') {
     return { state: 'blocked', reason: transport.reason };
   }
@@ -2885,20 +2985,38 @@ export function nextDelayMs(random = Math.random) {
  * available warning that we are pushing too hard, well before a hard block.
  */
 export function createLatencyWatch() {
-  const { latencyEwmaAlpha, latencyBreachMultiple } = CONFIG.guard;
-  let ewma = null;
+  const {
+    latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
+  } = CONFIG.guard;
+
+  const warmup = [];
   let baseline = null;
+  let ewma = null;
 
   return {
     /** Returns true when smoothed latency has breached the threshold. */
     observe(ms) {
+      // A non-positive or non-finite reading is a broken measurement, not a fast
+      // response. Admitting one poisons the baseline and every later comparison:
+      // a single 0 made the next request look infinitely slower, and a negative
+      // value produced an instant false breach.
+      if (!Number.isFinite(ms) || ms <= 0) return false;
+
+      ewma = ewma === null ? ms : latencyEwmaAlpha * ms + (1 - latencyEwmaAlpha) * ewma;
+
       if (baseline === null) {
-        baseline = ms;
-        ewma = ms;
-        return false;
+        warmup.push(ms);
+        if (warmup.length < baselineSamples) return false;
+        // Median of the opening samples, not the first one. A single unlucky slow
+        // request used to become the permanent baseline, after which nothing could
+        // ever breach and the pressure signal was silently dead.
+        const sorted = [...warmup].sort((a, b) => a - b);
+        baseline = sorted[Math.floor(sorted.length / 2)];
       }
-      ewma = latencyEwmaAlpha * ms + (1 - latencyEwmaAlpha) * ewma;
-      return ewma > baseline * latencyBreachMultiple;
+
+      // The absolute ceiling means a legitimately high baseline cannot switch
+      // detection off altogether.
+      return ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
     },
   };
 }
