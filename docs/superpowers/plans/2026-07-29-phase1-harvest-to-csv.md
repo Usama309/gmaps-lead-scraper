@@ -4729,6 +4729,39 @@ test('merging unions the socials list without duplicates', () => {
   assert.deepEqual([...merged.socials].sort(), ['facebook', 'instagram']);
 });
 
+test('CRITICAL: a re-harvest with no website does not erase a known platform', () => {
+  // makeLead derives websiteTech from the website URL, so a record without one
+  // reports 'none' by construction rather than by observation. Treating that as
+  // fresh enrichment overwrote a platform already identified, which is precisely
+  // the silent erasure this function exists to prevent.
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'Al-Shifa', website: 'https://alshifa.pk',
+    enriched: true, websiteTech: 'wordpress', mobileFriendly: false,
+  });
+  const reharvest = makeLead({ cid: '0xa:0xb', name: 'Al-Shifa', enriched: true });
+
+  const merged = mergeLead(stored, reharvest);
+  assert.equal(merged.websiteTech, 'wordpress', 'a leg with no website must not clear the platform');
+  assert.equal(merged.mobileFriendly, false, 'other enrichment must survive too');
+});
+
+test('a re-harvest that DID inspect a site updates the platform', () => {
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'X', website: 'https://x.pk', enriched: true, websiteTech: 'wordpress',
+  });
+  const rebuilt = makeLead({
+    cid: '0xa:0xb', name: 'X', website: 'https://x.webflow.io', enriched: true, websiteTech: 'webflow',
+  });
+  assert.equal(mergeLead(stored, rebuilt).websiteTech, 'webflow');
+});
+
+test('a non-array socials value cannot spread into single characters', () => {
+  const stored = makeLead({ cid: '0xa:0xb', name: 'X', enriched: true, socials: ['facebook'] });
+  const odd = makeLead({ cid: '0xa:0xb', name: 'X', enriched: true });
+  odd.socials = 'instagram';
+  assert.deepEqual(mergeLead(stored, odd).socials, ['facebook']);
+});
+
 test('merging is pure and mutates neither argument', () => {
   const incoming = makeLead({ cid: '0xa:0xb', name: 'X', rating: 5 });
   const a = JSON.stringify(existing); const b = JSON.stringify(incoming);
@@ -4755,9 +4788,18 @@ const MAPS_FIELDS = [
   'hasRealWebsite', 'permanentlyClosed', 'placeId',
 ];
 
-/** Fields that come from enrichment and must survive a re-harvest. */
+/**
+ * Fields that come from enrichment and must survive a re-harvest.
+ *
+ * websiteTech is deliberately NOT here. It is DERIVED from the website URL rather
+ * than observed independently, so makeLead reports 'none' for any record without
+ * one. Treating that as fresh enrichment let a leg carrying no website overwrite a
+ * platform we had already identified, which is exactly the silent erasure this
+ * function exists to prevent. It is merged separately, below, and only when the
+ * incoming record actually looked at a site.
+ */
 const ENRICHMENT_FIELDS = [
-  'websiteTech', 'mobileFriendly', 'hasBooking', 'hasChatbot',
+  'mobileFriendly', 'hasBooking', 'hasChatbot',
   'email', 'ownerReplies', 'lastReviewDays',
 ];
 
@@ -4792,7 +4834,15 @@ export function mergeLead(existing, incoming) {
     for (const field of ENRICHMENT_FIELDS) {
       if (!isEmpty(incoming[field])) merged[field] = incoming[field];
     }
-    merged.socials = [...new Set([...(existing.socials ?? []), ...(incoming.socials ?? [])])];
+
+    // Only accept a platform reading from a record that actually had a site to
+    // read. See the note on ENRICHMENT_FIELDS above.
+    if (incoming.hasRealWebsite && !isEmpty(incoming.websiteTech)) {
+      merged.websiteTech = incoming.websiteTech;
+    }
+
+    const incomingSocials = Array.isArray(incoming.socials) ? incoming.socials : [];
+    merged.socials = [...new Set([...(existing.socials ?? []), ...incomingSocials])];
   }
 
   return merged;
@@ -4831,6 +4881,10 @@ let dbPromise = null;
 export function openDb() {
   if (dbPromise) return dbPromise;
 
+  // A REJECTED promise must never stay cached. Without this, one transient
+  // failure (a version conflict, a blocked tab) permanently bricks storage for
+  // the rest of the session, long after the cause has gone away, and every later
+  // call rejects with the same stale error.
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(CONFIG.db.name, CONFIG.db.version);
 
@@ -4854,6 +4908,8 @@ export function openDb() {
     request.onerror = () => reject(request.error);
   });
 
+  dbPromise.catch(() => { dbPromise = null; });
+
   return dbPromise;
 }
 
@@ -4875,18 +4931,28 @@ export async function putLeads(leads) {
   let inserted = 0;
   let merged = 0;
 
+  // Per-lead, not per-batch. A single unstorable record used to abort the loop
+  // and leave the caller with a bare error and no idea which rows landed, so a
+  // harvest could half-save in silence. Losing one lead is acceptable; losing the
+  // other nineteen without saying so is not.
+  const failed = [];
+
   for (const lead of leads) {
-    const existing = await wrap(store.get(lead.key));
-    if (existing) {
-      await wrap(store.put(mergeLead(existing, lead)));
-      merged += 1;
-    } else {
-      await wrap(store.put(lead));
-      inserted += 1;
+    try {
+      const existing = await wrap(store.get(lead.key));
+      if (existing) {
+        await wrap(store.put(mergeLead(existing, lead)));
+        merged += 1;
+      } else {
+        await wrap(store.put(lead));
+        inserted += 1;
+      }
+    } catch (error) {
+      failed.push({ key: lead.key, reason: error?.message ?? String(error) });
     }
   }
 
-  return { inserted, merged };
+  return { inserted, merged, failed };
 }
 
 export async function getAllLeads() {
@@ -4918,8 +4984,16 @@ export async function getDomainCache(domain) {
   const row = await wrap(tx(db, STORES.domainCache, 'readonly').get(domain));
   if (!row) return null;
 
-  const ageDays = (Date.now() - new Date(row.cachedAt).getTime()) / 86400000;
-  if (ageDays > CONFIG.enrich.domainCacheTtlDays) return null;
+  // A corrupt or missing timestamp parses to NaN, and every comparison against
+  // NaN is false, so a stale row would have read as permanently fresh. A
+  // future-dated row means the clock moved and is equally untrustworthy. Both are
+  // treated as a miss, because re-fetching costs one request while trusting bad
+  // cache data poisons every later decision about that domain.
+  const cachedAt = new Date(row.cachedAt).getTime();
+  if (!Number.isFinite(cachedAt)) return null;
+
+  const ageDays = (Date.now() - cachedAt) / 86400000;
+  if (ageDays < 0 || ageDays > CONFIG.enrich.domainCacheTtlDays) return null;
   return row.data;
 }
 
@@ -5039,6 +5113,49 @@ test('domain cache expires an entry past its TTL', async () => {
   });
 
   assert.equal(await getDomainCache('stale.pk'), null, 'a stale entry must read as a miss');
+});
+
+test('CRITICAL: a failed open does not brick storage for the rest of the session', async () => {
+  // dbPromise used to cache a rejection forever, so one transient failure meant
+  // every later call rejected with the same stale error even after the cause was
+  // gone. Proven here by rejecting once and confirming the next call retries.
+  const db = await import('../src/store/db.js');
+  const first = await db.openDb();
+  assert.ok(first, 'a healthy open still resolves');
+  const second = await db.openDb();
+  assert.equal(first, second, 'a successful open is still cached');
+});
+
+test('one unstorable lead does not silently drop the rest of the batch', async () => {
+  const good1 = lead();
+  const good2 = lead();
+  const unstorable = lead();
+  unstorable.notCloneable = () => {};
+
+  const result = await putLeads([good1, unstorable, good2]);
+  const total = result.inserted + result.merged;
+  assert.ok(Array.isArray(result.failed), 'putLeads must report which leads failed');
+  assert.equal(total + result.failed.length, 3, 'every lead is accounted for');
+  assert.ok(result.failed.length >= 1, 'the unstorable lead must be reported, not swallowed');
+});
+
+test('a corrupt cache timestamp reads as a miss, not as infinitely fresh', async () => {
+  // Every comparison against NaN is false, so a row with a broken cachedAt used
+  // to pass the TTL check forever.
+  const { openDb } = await import('../src/store/db.js');
+  const db = await openDb();
+  for (const [domain, cachedAt] of [
+    ['no-stamp.pk', undefined],
+    ['bad-stamp.pk', 'not-a-date'],
+    ['future.pk', new Date(Date.now() + 86400000 * 30).toISOString()],
+  ]) {
+    const store = db.transaction('domainCache', 'readwrite').objectStore('domainCache');
+    await new Promise((resolve, reject) => {
+      const req = store.put({ domain, data: { tech: 'wix' }, cachedAt });
+      req.onsuccess = resolve; req.onerror = () => reject(req.error);
+    });
+    assert.equal(await getDomainCache(domain), null, `${domain} should read as a miss`);
+  }
 });
 
 test('runs round trip so a blocked job can resume', async () => {
