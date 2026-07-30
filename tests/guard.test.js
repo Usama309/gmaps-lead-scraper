@@ -115,6 +115,26 @@ test('one anomalously fast response does not drag the baseline down', () => {
   assert.equal(breached, false, 'normal latency after one fast outlier is not pressure');
 });
 
+test('a slowdown beginning during warmup breaches on the relative check alone', () => {
+  // THE TEST THAT LOCKS THE BASELINE CHOICE. Every other latency test passes with
+  // either a median or a second-smallest baseline, which meant the choice between
+  // them was unprotected and a regression to the median would have gone green.
+  //
+  // Two fast samples then a sustained 4000 ms. A median baseline lands on 4000 and
+  // sees nothing wrong; the second smallest lands on 900 and breaches. Deliberately
+  // kept under absoluteLatencyCeilingMs so the ceiling cannot mask the difference,
+  // which is what makes this case separating rather than merely slow.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [900, 900, 4000, 4000, 4000, 4000, 4000, 4000]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.ok(4000 < CONFIG.guard.absoluteLatencyCeilingMs,
+    'this case only separates while it stays under the ceiling');
+  assert.equal(breached, true,
+    'a slowdown starting during warmup must still register as pressure');
+});
+
 test('the absolute ceiling covers a slowdown that begins during warmup', () => {
   // When the warmup window is itself contaminated, no relative comparison can
   // help, so the ceiling is the only thing that can fire. Documenting that it is
