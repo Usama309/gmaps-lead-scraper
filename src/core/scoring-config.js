@@ -49,14 +49,17 @@ export const SCORING = Object.freeze({
   }),
 
   viability: Object.freeze({
-    // [minReviews, maxReviews, points]
+    // Each band carries the text that explains it. Keeping the wording beside the
+    // numbers it describes is what stops the explanation desynchronising from the
+    // score when these are retuned. {count} is substituted at render time.
     bands: Object.freeze([
-      Object.freeze([10, 300, 20]),
-      Object.freeze([301, 1000, 12]),
-      Object.freeze([1001, Infinity, 4]),
-      Object.freeze([0, 9, 8]),
+      Object.freeze({ min: 10, max: 300, points: 20, reason: '{count} reviews' }),
+      Object.freeze({ min: 301, max: 1000, points: 12, reason: '{count} reviews, established' }),
+      Object.freeze({ min: 1001, max: Infinity, points: 4, reason: '{count} reviews, likely has an agency' }),
+      Object.freeze({ min: 0, max: 9, points: 8, reason: 'only {count} reviews' }),
     ]),
     unknown: 12,
+    unknownReason: 'review count unknown',
   }),
 
   modifiers: Object.freeze({

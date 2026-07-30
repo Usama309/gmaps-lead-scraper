@@ -108,6 +108,22 @@ test('unknown review count scores the neutral midpoint, for licensed sources', (
   assert.ok(reasons.includes('review count unknown'));
 });
 
+test('every viability band explains itself, so a retune cannot silence the reason', () => {
+  for (const band of SCORING.viability.bands) {
+    const inside = Number.isFinite(band.max) ? band.max : band.min;
+    const { reasons } = scoreLead(base({
+      website: 'https://x.pk', websiteTech: 'wordpress',
+      reviewCount: inside,
+    }));
+    const expected = band.reason.replace('{count}', inside);
+    assert.ok(
+      reasons.includes(expected),
+      `band ${band.min}-${band.max} produced no reason text; expected ${expected} in ${JSON.stringify(reasons)}`,
+    );
+    assert.ok(band.reason.length > 0, `band ${band.min}-${band.max} has empty reason text`);
+  }
+});
+
 test('unreachable businesses are multiplied down', () => {
   const reachable = scoreLead(base({ website: null, phone: '+92 300 000 0000' })).score;
   const unreachable = scoreLead(base({ website: null, phone: null, email: null })).score;

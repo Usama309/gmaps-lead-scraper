@@ -57,17 +57,16 @@ function bookingGap(lead, reasons) {
 function viability(lead, reasons) {
   const count = lead.reviewCount;
   if (count === null) {
-    reasons.push('review count unknown');
+    reasons.push(SCORING.viability.unknownReason);
     return SCORING.viability.unknown;
   }
-  for (const [min, max, points] of SCORING.viability.bands) {
-    if (count >= min && count <= max) {
-      if (points === 20) reasons.push(`${count} reviews`);
-      else if (count > 1000) reasons.push(`${count} reviews, likely has an agency`);
-      else if (count < 10) reasons.push(`only ${count} reviews`);
-      return points;
+  for (const band of SCORING.viability.bands) {
+    if (count >= band.min && count <= band.max) {
+      reasons.push(band.reason.replace('{count}', count));
+      return band.points;
     }
   }
+  reasons.push(SCORING.viability.unknownReason);
   return SCORING.viability.unknown;
 }
 
