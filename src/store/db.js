@@ -94,6 +94,25 @@ export async function putLeads(leads) {
   return { inserted, merged, failed };
 }
 
+/**
+ * Close the database and drop the cached handle.
+ *
+ * Real API rather than a test hook: the worker needs it to release the handle
+ * when a run ends, and an upgrade in another tab needs the old connection gone
+ * or the new one blocks. It also makes the failed-open recovery path testable,
+ * which was previously only assertable by reading the code.
+ */
+export async function closeDb() {
+  if (!dbPromise) return;
+  try {
+    const db = await dbPromise;
+    db.close();
+  } catch {
+    // Already rejected or already closed. Either way there is nothing to release.
+  }
+  dbPromise = null;
+}
+
 export async function getAllLeads() {
   const db = await openDb();
   return wrap(tx(db, STORES.leads, 'readonly').getAll());
