@@ -97,9 +97,9 @@ export const googlePayloadSource = {
     // throws at the point of return instead of reaching a caller that branches on
     // it and silently falls through to treating the run as successful.
     //
-    // Deliberately takes a string literal at every call site. The test that scans
-    // this file for finish('...') calls can only see literals, so passing a
-    // variable here would compile fine and silently escape that check.
+    // Deliberately called as `return finish` with a string literal at every site.
+    // The test that scans this file can only see literals anchored on a return, so
+    // passing a variable would compile fine and silently escape that check.
     const finish = (stopReason, problems = []) => ({
       leads,
       stopReason: assertStopReason(stopReason),
