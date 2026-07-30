@@ -5405,6 +5405,7 @@ export const MSG = Object.freeze({
   ABORT_RUN: 'mapprospector/abort-run',
   GET_LEADS: 'mapprospector/get-leads',
   EXPORT: 'mapprospector/export',
+  CONFIRM_EXPORT: 'mapprospector/confirm-export',
   RUN_PROGRESS: 'mapprospector/run-progress',
   RUN_BLOCKED: 'mapprospector/run-blocked',
 });
@@ -5661,20 +5662,26 @@ function broadcast(type, payload) {
 async function startRun(config) {
   if (activeRun) throw new Error('a run is already in progress');
 
+  // Claimed SYNCHRONOUSLY, before the first await. Setting this after recallPb
+  // left a window where two fast clicks both passed the guard and started
+  // concurrent pipelines against a shared dedupe store.
+  const runId = `run-${Date.now()}`;
+  const controller = new AbortController();
+  activeRun = { runId, controller, legs: null };
+
   const pb = await recallPb();
   if (!pb) {
+    activeRun = null;
     throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
   }
 
   const { legs, coverage } = planLegs(config);
-  const controller = new AbortController();
-  const runId = `run-${Date.now()}`;
+  activeRun.legs = legs;
 
   // Serialises every store write for this run, so they land in order and can be
   // drained before the run reports done.
   let pendingWrites = Promise.resolve();
 
-  activeRun = { runId, controller, legs };
   await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
 
   try {
@@ -5736,11 +5743,30 @@ async function getLeads(filterState) {
   return { leads: filterLeads(leads, { ...filterState, exportedKeys }), totalStored: leads.length };
 }
 
+/**
+ * Build the file. Deliberately does NOT mark anything exported.
+ *
+ * Marking here would flag leads before the download exists. A blocked download, a
+ * cancelled save dialog or a click that silently no-ops would then leave those
+ * businesses permanently skipped on every future sweep, with no error and no way
+ * for the operator to know which ones vanished. The dashboard confirms once the
+ * file is actually on its way.
+ */
 async function exportLeads(filterState) {
   const { leads } = await getLeads(filterState);
-  const csv = toCsv(leads);
-  await markExported(leads.map((l) => l.key));
-  return { csv, count: leads.length, filename: `mapprospector-${Date.now()}.csv` };
+  return {
+    csv: toCsv(leads),
+    count: leads.length,
+    keys: leads.map((l) => l.key),
+    filename: `mapprospector-${Date.now()}.csv`,
+  };
+}
+
+/** Record what actually made it out, called after the download has been triggered. */
+async function confirmExport(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return { marked: 0 };
+  await markExported(keys);
+  return { marked: keys.length };
 }
 
 const HANDLERS = {
@@ -5753,6 +5779,7 @@ const HANDLERS = {
   },
   [MSG.GET_LEADS]: (payload) => getLeads(payload ?? {}),
   [MSG.EXPORT]: (payload) => exportLeads(payload ?? {}),
+  [MSG.CONFIRM_EXPORT]: (payload) => confirmExport(payload?.keys),
 };
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
@@ -5861,8 +5888,22 @@ function stripeColor(score) {
   return 'var(--sorted)';
 }
 
+/**
+ * Escape for HTML. Covers quotes as well as angle brackets.
+ *
+ * Nothing here currently lands inside a quoted attribute, so quote escaping is not
+ * load-bearing today. It is included because the day someone writes
+ * href="${esc(d.website)}" this becomes the only thing between a business name and
+ * script execution in the extension's own privileged origin, and that edit will not
+ * come with a reminder. Lead data comes from Maps listings, which anyone can register.
+ */
 function esc(text) {
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function renderRows(leads) {
@@ -5921,14 +5962,31 @@ function renderStats(leads, totalStored) {
   $('#e-count').textContent = leads.length;
 }
 
+function showError(message) {
+  const toast = $('#e-toast');
+  toast.textContent = message;
+  toast.classList.add('on');
+}
+
+function clearError() {
+  $('#e-toast').classList.remove('on');
+}
+
 async function refresh() {
   try {
     const { leads, totalStored } = await send(MSG.GET_LEADS, state);
+    clearError();
     renderRows(leads);
     renderStats(leads, totalStored);
   } catch (error) {
-    $('#e-toast').textContent = error.message;
-    $('#e-toast').classList.add('on');
+    // Clear the table as well as showing the message. Leaving the previous rows
+    // and counts under an error toast lets the operator read stale numbers as
+    // current ones, which is worse than showing nothing.
+    $('#mp-rows').innerHTML =
+      '<tr><td colspan="11" style="padding:26px;text-align:center;color:var(--ink-3)">'
+      + 'Could not reach the extension. The counts below are cleared rather than left stale.</td></tr>';
+    renderStats([], 0);
+    showError(error.message);
   }
 }
 
@@ -5963,8 +6021,18 @@ function bind() {
     $('#f-scoreval').textContent = state.minScore;
     refresh();
   });
-  $('#f-minrev').addEventListener('input', (e) => { state.minReviews = Number(e.target.value) || 0; refresh(); });
-  $('#f-maxrev').addEventListener('input', (e) => { state.maxReviews = Number(e.target.value) || Infinity; refresh(); });
+  // Parsed explicitly rather than with `|| fallback`, because 0 is falsy: typing a
+  // max of 0 meant "no limit" instead of "cap at zero", which is the opposite.
+  const numberOr = (raw, fallback) => {
+    const value = Number(raw);
+    return raw.trim() === '' || !Number.isFinite(value) ? fallback : value;
+  };
+  $('#f-minrev').addEventListener('input', (e) => {
+    state.minReviews = numberOr(e.target.value, 0); refresh();
+  });
+  $('#f-maxrev').addEventListener('input', (e) => {
+    state.maxReviews = numberOr(e.target.value, Infinity); refresh();
+  });
   $('#f-lastrev').addEventListener('change', (e) => { state.lastReviewWithinDays = Number(e.target.value); refresh(); });
   $('#f-rating').addEventListener('change', (e) => { state.minRating = Number(e.target.value); refresh(); });
   $('#f-dupe').addEventListener('change', (e) => { state.skipExported = e.target.checked; refresh(); });
@@ -5972,18 +6040,26 @@ function bind() {
   $('#e-go').addEventListener('click', async () => {
     const toast = $('#e-toast');
     try {
-      const { csv, count, filename } = await send(MSG.EXPORT, state);
+      const { csv, count, keys, filename } = await send(MSG.EXPORT, state);
       const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
       const anchor = Object.assign(document.createElement('a'), { href: url, download: filename });
       anchor.click();
       URL.revokeObjectURL(url);
+
+      // Only now record them as exported. Confirming before the download exists
+      // would permanently skip these businesses on every later sweep if the save
+      // never happened, and nothing would tell the operator which ones went.
+      await send(MSG.CONFIRM_EXPORT, { keys });
+
       toast.textContent = `→ exported ${count} leads`;
+      toast.classList.add('on');
+      setTimeout(() => toast.classList.remove('on'), 3000);
       await refresh();
     } catch (error) {
-      toast.textContent = error.message;
+      // Errors persist until the next successful refresh clears them, rather than
+      // fading after three seconds like a success message.
+      showError(error.message);
     }
-    toast.classList.add('on');
-    setTimeout(() => toast.classList.remove('on'), 3000);
   });
 }
 
@@ -6061,7 +6137,15 @@ const write = (text, warn = false) => {
   log.prepend(line);
 };
 
-document.getElementById('run').addEventListener('click', async () => {
+const runButton = document.getElementById('run');
+
+runButton.addEventListener('click', async () => {
+  // Disabled for the duration. The worker also refuses a second run, but a guard
+  // there cannot stop the operator queueing clicks, and a disabled button says
+  // plainly that something is already happening.
+  if (runButton.disabled) return;
+  runButton.disabled = true;
+
   const config = {
     keywords: document.getElementById('kw').value.split(',').map((k) => k.trim()).filter(Boolean),
     lat: Number(document.getElementById('lat').value),
@@ -6072,6 +6156,8 @@ document.getElementById('run').addEventListener('click', async () => {
 
   write(`starting: ${config.keywords.join(', ')} within ${config.radiusKm} km`);
   const response = await chrome.runtime.sendMessage(makeRequest(MSG.START_RUN, config));
+
+  runButton.disabled = false;
 
   if (!response.ok) { write(response.error, true); return; }
 
