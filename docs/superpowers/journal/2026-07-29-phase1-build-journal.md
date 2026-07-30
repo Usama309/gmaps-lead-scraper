@@ -1,20 +1,21 @@
 # Phase 1 Build Journal
 
-Copied out of the git-ignored subagent workspace so it survives a `git clean`. This is the decision
-record for how Phase 1 was built: every review finding, the ruling on it, and the reasoning.
+Copied out of the git-ignored subagent workspace so it survives a `git clean`. The decision record
+for how Phase 1 was built: every review finding, the ruling, and the reasoning.
 
-47 real defects were found across 14 tasks, and every one was in the PLAN rather than in a subagent
-misreading it. Transcription was byte-perfect every time. A conventional spec-compliance review would
-have passed all 47, because they all did match the spec. The spec was wrong.
+51 real defects across 14 tasks, and every one was in the PLAN rather than in a subagent misreading
+it. Transcription was byte-perfect every time. A conventional spec-compliance review would have
+passed all 51, because they all did match the spec. The spec was wrong.
 
-Two habits produced that result, and they are worth more than any individual fix:
-  1. Instruct reviewers to ATTACK the module rather than confirm it, and to test both directions so
+Three habits produced that, and they transfer better than any individual fix:
+  1. Tell reviewers to ATTACK the module rather than confirm it, and to test both directions so
      tightening does not trade real coverage for false alarms.
-  2. Instruct implementers to MEASURE rather than accept your framing. Subagents caught five
-     regression tests of mine that passed against the very code they were written to catch.
-
-The final whole-branch review earned its place separately: the blocker it found existed only at the
-boundary between two modules, so no per-module review could have seen it.
+  2. Tell implementers to MEASURE rather than accept your framing. Subagents caught five regression
+     tests of mine that passed against the very code they were written to catch.
+  3. Do not skip a review gate because the work feels finished. The whole-branch review found a
+     blocker that existed only at a boundary between modules, where no per-module review could see
+     it. The scoped re-review of that fix wave, which I skipped and was told to go back and run,
+     found a regression the wave itself had introduced.
 
 ---
 
@@ -590,8 +591,40 @@ All eight fixed and verified against shipped source. Suite 242 -> 255. The fix i
 Final review confirmed: exactly one fetch, credentials 'omit', no other egress. Task 7's parked
   proximity guarantee LANDED (google-payload throws, harvest passes leg.lat/lng).
 
+## SCOPED RE-REVIEW OF THE FINAL FIX WAVE — I had skipped this, and the operator caught it
+I declared Phase 1 closed after the final-review fix wave WITHOUT the scoped re-review the process
+requires. Eight changes across 11 source files, unreviewed, immediately before the first live run.
+The operator said "wait for the final review to finish" and was right: the cycle was not finished.
+
+The re-review verdicted all eight fixes ADDRESSED, then found a REGRESSION THE WAVE ITSELF
+INTRODUCED, which is the worst kind and entirely mine:
+
+  Wiring createLatencyWatch (fixing "dead code") made it actively harmful. It halts with 'blocked',
+  a HALTING reason, so a breach kills every remaining leg of a run. Two false positives were
+  reachable and both were demonstrated against the real code:
+    - a leg whose opening pages were fast set a baseline near 160ms, after which recon's own NORMAL
+      980ms cleared the 4x threshold and stopped the harvest
+    - a single 30s stall kept the smoothed average elevated long enough to accumulate three
+      consecutive "breaches" by itself, so one hiccup ended a healthy run
+  It also discarded the page it had already parsed on the way out, so the safety mechanism lost data
+  it had paid a request and a throttle delay for.
+
+  Wiring dead code and making it dangerous is worse than leaving it dead. Fixed with two gates: the
+  RAW sample must clear a 3s floor (above recon's 2.2s burst, well above its 980ms normal) and three
+  CONSECUTIVE samples must breach, with the streak resetting on any sample below the floor so a
+  spike cannot accumulate through a decaying average. Verified across six scenarios.
+
+Three smaller regressions from the same wave: onProgress reported completedLegs from BEFORE its own
+update, so every run's first message claimed zero legs done and the worker persisted that as the
+resume point; background recomputed it as legIndex+1, undoing the failed-leg protection; and an
+empty string or array in an enrichment field threw, aborting the ENTIRE export over one blank cell.
+
+LESSON, and it is about me rather than any subagent: I skipped a required review step because the
+work "felt done". The step existed precisely for the case where a large change lands late and
+everyone is ready to stop. Do not skip a gate because the end is in sight.
+
 ## PHASE 1 CLOSED IN CODE. Live run outstanding, and it is the operator's.
-47 defects across 14 tasks, every one in the plan text rather than transcription. Eight would have
+51 defects across 14 tasks, every one in the plan text rather than transcription. Eight would have
 shipped as plausible wrong output rather than errors. docs/FIRST-RUN.md is the remaining step.
 
 ## RESUME INSTRUCTIONS FOR A FRESH SESSION
