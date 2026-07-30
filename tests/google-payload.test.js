@@ -59,7 +59,15 @@ test('every stopReason harvestLeg can actually return is declared in STOP_REASON
   // while the prose list did not. Reading the source keeps them from separating.
   const source = readFileSync(new URL('../src/sources/google-payload.js', import.meta.url), 'utf8');
   const returned = [...source.matchAll(/finish\('([a-z_]+)'/g)].map((m) => m[1]);
-  assert.ok(returned.length >= 6, `expected several finish() calls, found ${returned.length}`);
+
+  // The floor is load-bearing, not decoration. This scan is a regex, so if the
+  // call shape ever changed it would match nothing and the assertion below would
+  // pass vacuously over an empty list. Counting the calls is what stops a silent
+  // no-op from reading as a clean result.
+  const handBuilt = [...source.matchAll(/stopReason:\s*'/g)].length;
+  assert.equal(handBuilt, 0, `${handBuilt} returns build stopReason by hand, bypassing validation`);
+  assert.ok(returned.length >= 10,
+    `expected every exit to route through finish(), found only ${returned.length}`);
   for (const reason of new Set(returned)) {
     assert.ok(STOP_REASONS.includes(reason), `${reason} is returned but not declared`);
   }

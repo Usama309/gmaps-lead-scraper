@@ -96,6 +96,10 @@ export const googlePayloadSource = {
     // Single exit shape. Every return goes through here, so a mistyped reason
     // throws at the point of return instead of reaching a caller that branches on
     // it and silently falls through to treating the run as successful.
+    //
+    // Deliberately takes a string literal at every call site. The test that scans
+    // this file for finish('...') calls can only see literals, so passing a
+    // variable here would compile fine and silently escape that check.
     const finish = (stopReason, problems = []) => ({
       leads,
       stopReason: assertStopReason(stopReason),
@@ -105,11 +109,16 @@ export const googlePayloadSource = {
     while (offset < CONFIG.harvest.perQueryCap) {
       if (signal?.aborted) return finish('aborted');
 
-      // Every exit from this loop must be a RETURN, never a throw. `leads` already
+      // No OPERATIONAL failure may escape this loop as a throw. `leads` already
       // holds everything harvested so far, and a rejected fetch that escaped would
       // discard all of it. The two most common real-world failures both arrive as
       // rejections rather than responses: a flaky network, and the operator
       // pressing Stop while a request is in flight.
+      //
+      // Stated precisely because the distinction matters: finish() can still throw,
+      // via assertStopReason, on a mistyped reason. That is a PROGRAMMING error and
+      // should be loud during development. A network fault is an operational one and
+      // must come back as data. Only the second category is caught here.
       let page;
       try {
         page = await fetchPage({ query, pb: setPbOffset(pb, offset), signal });
