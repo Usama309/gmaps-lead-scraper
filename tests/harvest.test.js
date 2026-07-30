@@ -332,6 +332,30 @@ test('planLegs deduplicates keywords so leg ids stay unique', () => {
   assert.equal(legs.length, 1, 'whitespace-only and repeated keywords collapse to one');
 });
 
+test('progress carries the real resume point, not the loop index', async () => {
+  // The worker persists completedLegs from this payload. Recomputing it as
+  // legIndex + 1 would undo the queue's refusal to advance past a failed leg,
+  // which is what stops a resume skipping it.
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const seen = [];
+  let n = 0;
+  await runHarvest({
+    legs, pb: '!7i20!8i0',
+    onProgress: (p) => seen.push(p.completedLegs),
+    source: {
+      id: 'fake',
+      async harvestLeg() {
+        n += 1;
+        return n === 1
+          ? { leads: [], stopReason: 'end_of_list', problems: [] }
+          : { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] };
+      },
+    },
+    delay: async () => {},
+  });
+  assert.deepEqual(seen, [1, 1, 1], 'stops advancing at the first failure and stays there');
+});
+
 test('runHarvest reports progress per leg', async () => {
   const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const seen = [];

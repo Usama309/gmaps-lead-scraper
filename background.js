@@ -105,7 +105,10 @@ async function startRun(config) {
       onProgress: (p) => {
         broadcast(MSG.RUN_PROGRESS, p);
         pendingWrites = pendingWrites
-          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }))
+          // p.completedLegs, not legIndex + 1. The queue deliberately stops advancing
+          // that number past a failed leg so a resume retries it; recomputing it here
+          // would undo exactly that.
+          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.completedLegs }))
           .catch(() => {});
       },
     });

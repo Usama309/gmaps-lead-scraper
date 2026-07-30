@@ -131,6 +131,14 @@ test('renders booleans as yes and no, not true and false', () => {
   assert.ok(csv.includes('yes'));
 });
 
+test('an empty enrichment value renders blank instead of aborting the export', () => {
+  // Validating an empty string threw, which aborted the ENTIRE export over one
+  // blank field. A blank cell is a far better outcome than no file at all.
+  const csv = toCsv([row({ email: '', socials: [] })]);
+  assert.equal(cellOf(csv, 'Email'), '');
+  assert.equal(cellOf(csv, 'Social links'), '');
+});
+
 test('renders unknown enrichment as unknown, distinct from no', () => {
   const csv = toCsv([row({ mobileFriendly: null })]);
   const cells = csv.split(NL)[1];

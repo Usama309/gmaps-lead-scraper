@@ -50,10 +50,14 @@ function renderCell(value) {
 
 function renderEnrichmentCell(key, value) {
   if (value === null || value === undefined) return 'unknown';
-  // An empty array is "we looked and found none", which renders like any empty list.
-  if (Array.isArray(value) && value.length === 0) return '';
 
   const rule = ENRICHMENT_VALUES.get(key);
+
+  // An empty string or empty array is "we looked and found none". Validating it
+  // would throw and abort the ENTIRE export over one blank field, which is a far
+  // worse outcome than rendering a blank cell.
+  if (value === '' || (Array.isArray(value) && value.length === 0)) return '';
+
   if (!rule.allows(value)) {
     throw new Error(
       `${key} held ${JSON.stringify(value)}, which is not ${rule.describe} or null. `

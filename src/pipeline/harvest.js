@@ -175,8 +175,17 @@ export async function runHarvest({
     // would make a streaming consumer write the same business several times.
     if (fresh.length > 0) onLeads(fresh);
 
+    // Updated BEFORE progress is reported, because the worker persists the number
+    // from that payload as the resume point. Reporting the pre-update value made
+    // every run's first progress message claim zero legs done.
+    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
+      if (firstFailedLeg === null) firstFailedLeg = i;
+    }
+    completedLegs = firstFailedLeg ?? (i + 1);
+
     onProgress({
       legIndex: i,
+      completedLegs,
       totalLegs: legs.length,
       leg,
       legLeads: result.leads.length,
@@ -191,11 +200,6 @@ export async function runHarvest({
     if (HALTING_REASONS.includes(result.stopReason)) {
       return finish(result.stopReason);
     }
-
-    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
-      if (firstFailedLeg === null) firstFailedLeg = i;
-    }
-    completedLegs = firstFailedLeg ?? (i + 1);
 
     if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
