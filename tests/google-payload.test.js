@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSource } from '../src/sources/source.js';
+import { readFileSync } from 'node:fs';
+import { assertSource, assertStopReason, STOP_REASONS } from '../src/sources/source.js';
 import { CONFIG } from '../src/core/config.js';
 import { setPbOffset, setPbCentre, googlePayloadSource } from '../src/sources/google-payload.js';
 
@@ -40,6 +41,28 @@ test('googlePayloadSource conforms to the source interface', () => {
 
 test('assertSource rejects an object missing harvestLeg', () => {
   assert.throws(() => assertSource({ id: 'x' }), /harvestLeg/);
+});
+
+test('assertStopReason rejects an unknown reason instead of letting it reach a caller', () => {
+  // STOP_REASONS used to be documentation nothing checked. A typo would have
+  // produced a reason no caller branches on, which falls through every branch and
+  // reads as success.
+  for (const reason of STOP_REASONS) {
+    assert.equal(assertStopReason(reason), reason);
+  }
+  assert.throws(() => assertStopReason('blockd'), /unknown stopReason/);
+  assert.throws(() => assertStopReason(undefined), /unknown stopReason/);
+});
+
+test('every stopReason harvestLeg can actually return is declared in STOP_REASONS', () => {
+  // Guards the drift the doc comment already suffered: the array gained a reason
+  // while the prose list did not. Reading the source keeps them from separating.
+  const source = readFileSync(new URL('../src/sources/google-payload.js', import.meta.url), 'utf8');
+  const returned = [...source.matchAll(/finish\('([a-z_]+)'/g)].map((m) => m[1]);
+  assert.ok(returned.length >= 6, `expected several finish() calls, found ${returned.length}`);
+  for (const reason of new Set(returned)) {
+    assert.ok(STOP_REASONS.includes(reason), `${reason} is returned but not declared`);
+  }
 });
 
 test('assertSource rejects an object missing an id', () => {

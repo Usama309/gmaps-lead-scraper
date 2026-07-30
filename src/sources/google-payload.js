@@ -1,4 +1,5 @@
 import { CONFIG } from '../core/config.js';
+import { assertStopReason } from './source.js';
 import { extractPage, runCanary } from './payload-map.js';
 import { classifyTransport, classifyPage, nextDelayMs } from '../pipeline/guard.js';
 
@@ -92,8 +93,17 @@ export const googlePayloadSource = {
     let offset = 0;
     let canaryChecked = false;
 
+    // Single exit shape. Every return goes through here, so a mistyped reason
+    // throws at the point of return instead of reaching a caller that branches on
+    // it and silently falls through to treating the run as successful.
+    const finish = (stopReason, problems = []) => ({
+      leads,
+      stopReason: assertStopReason(stopReason),
+      problems,
+    });
+
     while (offset < CONFIG.harvest.perQueryCap) {
-      if (signal?.aborted) return { leads, stopReason: 'aborted', problems: [] };
+      if (signal?.aborted) return finish('aborted');
 
       // Every exit from this loop must be a RETURN, never a throw. `leads` already
       // holds everything harvested so far, and a rejected fetch that escaped would
@@ -105,33 +115,29 @@ export const googlePayloadSource = {
         page = await fetchPage({ query, pb: setPbOffset(pb, offset), signal });
       } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
-          return { leads, stopReason: 'aborted', problems: [] };
+          return finish('aborted');
         }
-        return {
-          leads,
-          stopReason: 'network_error',
-          problems: [`request failed at offset ${offset}: ${error?.message ?? String(error)}`],
-        };
+        return finish('network_error', [
+          `request failed at offset ${offset}: ${error?.message ?? String(error)}`,
+        ]);
       }
 
       if (!page || typeof page !== 'object') {
-        return {
-          leads,
-          stopReason: 'network_error',
-          problems: [`fetchPage returned ${page === null ? 'null' : typeof page} instead of a response`],
-        };
+        return finish('network_error', [
+          `fetchPage returned ${page === null ? 'null' : typeof page} instead of a response`,
+        ]);
       }
 
       const transport = classifyTransport(page);
 
       if (transport.state === 'blocked') {
         // Never retry through a block. Stop and let the operator decide.
-        return { leads, stopReason: 'blocked', problems: [transport.reason] };
+        return finish('blocked', [transport.reason]);
       }
 
       const parsed = parseBody(page.body);
       if (parsed === null) {
-        return { leads, stopReason: 'blocked', problems: ['payload did not parse as JSON'] };
+        return finish('blocked', ['payload did not parse as JSON']);
       }
 
       // Validate the index map against the very first real page, before trusting
@@ -142,7 +148,7 @@ export const googlePayloadSource = {
         // only thing that catches a latitude/longitude swap.
         const canary = runCanary(parsed, { lat, lng });
         if (!canary.ok) {
-          return { leads, stopReason: 'canary_failed', problems: canary.problems };
+          return finish('canary_failed', canary.problems);
         }
       }
 
@@ -153,11 +159,11 @@ export const googlePayloadSource = {
       });
 
       if (verdict.state === 'end_of_list') {
-        return { leads, stopReason: 'end_of_list', problems: [] };
+        return finish('end_of_list');
       }
 
       if (verdict.state === 'extraction_failed') {
-        return { leads, stopReason: 'canary_failed', problems: [verdict.reason] };
+        return finish('canary_failed', [verdict.reason]);
       }
 
       leads.push(...pageLeads);
@@ -169,7 +175,7 @@ export const googlePayloadSource = {
       if (leads.length >= CONFIG.harvest.perQueryCap) {
         leads.length = CONFIG.harvest.perQueryCap;
         onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
-        return { leads, stopReason: 'cap_reached', problems: [] };
+        return finish('cap_reached');
       }
 
       onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
@@ -178,6 +184,6 @@ export const googlePayloadSource = {
       if (offset < CONFIG.harvest.perQueryCap) await delay(nextDelayMs());
     }
 
-    return { leads, stopReason: 'cap_reached', problems: [] };
+    return finish('cap_reached');
   },
 };
