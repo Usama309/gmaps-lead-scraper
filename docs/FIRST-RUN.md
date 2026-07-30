@@ -98,9 +98,17 @@ coordinates: `33.7609824` and `72.342874`.
 
 **Roughly how long:** under a minute for 2 km.
 
+**If you see `finished: completed_with_errors`:** the run reached the end of its queue but at least
+one query failed along the way. The problems are listed underneath. The lead list is real but
+incomplete, which is why it does not say plain "completed".
+
 **If you see `PAUSED`:** Google asked us to stop. That is handled deliberately: the run halts rather
 than pushing through, and it will not have hammered anything. Wait a few minutes before retrying, and
 tell me what the message said.
+
+**If you see a message about responses slowing sustainedly:** that is the throttle's early warning,
+which fires before Google actually blocks anything. It needs three consecutive slow replies to
+trigger, so a single slow request will not cause it. Same advice: wait a few minutes, and tell me.
 
 **If it finishes with zero businesses:** stop, and tell me. That is the symptom that means the
 payload indices have moved, and the canary should have caught it and said so rather than returning an
@@ -140,6 +148,8 @@ Click **Open dashboard**. A new tab opens with the filter rail and the table.
 **Check:**
 - Column count matches the header, and nothing is shifted
 - The `Why it scored` column is readable
+- A `Score provisional` column reads **yes** on every row. That is correct for Phase 1 and it is in
+  the file deliberately, so a CSV that outlives this conversation still says its scores are a floor
 - `Mobile friendly` and `Online booking` read **unknown** rather than blank or no. That distinction
   is deliberate: unknown means never inspected, which is different from inspected and absent
 - No cell begins with a bare `=` or `@`. Business names that start with those are prefixed with an
