@@ -3179,7 +3179,10 @@ test('every stopReason harvestLeg can actually return is declared in STOP_REASON
   // Guards the drift the doc comment already suffered: the array gained a reason
   // while the prose list did not. Reading the source keeps them from separating.
   const source = readFileSync(new URL('../src/sources/google-payload.js', import.meta.url), 'utf8');
-  const returned = [...source.matchAll(/finish\('([a-z_]+)'/g)].map((m) => m[1]);
+  // Anchored on `return finish(` rather than `finish(` alone. The looser pattern
+  // could not tell code from prose, so an illustrative mention in a comment would
+  // have counted as a real exit, inflating the total and masking a deleted call.
+  const returned = [...source.matchAll(/return finish\('([a-z_]+)'/g)].map((m) => m[1]);
 
   // The floor is load-bearing, not decoration. This scan is a regex, so if the
   // call shape ever changed it would match nothing and the assertion below would
@@ -3576,9 +3579,9 @@ export const googlePayloadSource = {
     // throws at the point of return instead of reaching a caller that branches on
     // it and silently falls through to treating the run as successful.
     //
-    // Deliberately takes a string literal at every call site. The test that scans
-    // this file for finish('...') calls can only see literals, so passing a
-    // variable here would compile fine and silently escape that check.
+    // Deliberately called as `return finish` with a string literal at every site.
+    // The test that scans this file can only see literals anchored on a return, so
+    // passing a variable would compile fine and silently escape that check.
     const finish = (stopReason, problems = []) => ({
       leads,
       stopReason: assertStopReason(stopReason),
