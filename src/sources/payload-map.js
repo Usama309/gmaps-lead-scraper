@@ -117,27 +117,45 @@ function countDigits(value) {
   return (String(value).match(/\d/g) ?? []).length;
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 /**
  * What a healthy payload looks like, field by field.
  *
- * Coverage floors are set well below the live measurement (98% phone, 98% rating,
- * 67% website on 2026-07-29) so a genuinely thin market does not trip them, while
- * a total field loss does.
+ * Coverage floors sit close to the live measurement (98% phone, 98% rating,
+ * 67% website on 2026-07-29) rather than far below it. An earlier version used a
+ * 50% floor for phone, which meant a drift halving real coverage raised no alarm
+ * on the field the operator actually dials.
  *
- * `required: true` means every record must carry a valid value at any sample size,
- * because these two fields ARE the record's identity. Everything else is judged on
- * coverage, and only once the sample is large enough for a fraction to mean anything.
+ * Three separate mechanisms, because each catches a different failure:
+ *   required        every record must carry a valid value, at any sample size
+ *   minAnyValid     at least one record must, once the sample is 2 or more. This
+ *                   catches a TOTAL field loss on a page too small for a
+ *                   percentage to mean anything, which was a real blind spot: a
+ *                   4-record page could lose phone, rating, reviewCount, lat and
+ *                   lng entirely and still report healthy.
+ *   minCoverage     a fraction, judged only once the sample is large enough
+ *   mustDifferFrom  the value must not equal another field's value on the same
+ *                   record. This is how a shift onto a populated-but-plausible
+ *                   field gets caught: a bare format check cannot tell a real
+ *                   business name from an address string sitting in its slot.
  */
 export const CANARY_RULES = Object.freeze({
   minRecordsToJudgeCoverage: 5,
+  minRecordsToRequireAnyValid: 2,
+  // A record's coordinates should sit near the point we queried. A lat/lng swap
+  // passes both range checks whenever |longitude| is under 90, which covers most
+  // of the inhabited world, so range validation alone cannot catch it.
+  maxDistanceFromQueryKm: 250,
+  minRecordsNearQuery: 0.5,
   fields: Object.freeze([
     Object.freeze({
       field: 'name', required: true, minCoverage: 0.95,
-      // Rejecting CID-shaped strings is what catches a constant-offset shift:
-      // move every index by one and `name` lands on the CID hex, which is still
-      // a string and would sail past a bare typeof check.
-      valid: (v) => typeof v === 'string' && v.trim().length > 0 && !CID_PATTERN.test(v),
-      why: 'name must be a non-empty string that is not a CID',
+      valid: (v) => isNonEmptyString(v) && !CID_PATTERN.test(v),
+      mustDifferFrom: Object.freeze(['address', 'placeId', 'cid']),
+      why: 'name must be a non-empty string, not a CID, and not a copy of another field',
     }),
     Object.freeze({
       field: 'cid', required: true, minCoverage: 0.90,
@@ -145,32 +163,58 @@ export const CANARY_RULES = Object.freeze({
       why: 'cid is the primary dedupe key; drift landing it on shared text merges distinct businesses',
     }),
     Object.freeze({
-      field: 'phone', required: false, minCoverage: 0.50,
+      field: 'phone', minAnyValid: true, minCoverage: 0.80,
       valid: (v) => typeof v === 'string' && countDigits(v) >= 7,
-      why: 'phone is the field the operator actually calls; measured at 98% live',
+      why: 'phone is the field the operator actually dials; measured at 98% live',
     }),
     Object.freeze({
-      field: 'rating', required: false, minCoverage: 0.50,
+      field: 'rating', minAnyValid: true, minCoverage: 0.80,
       valid: (v) => typeof v === 'number' && v >= 0 && v <= 5,
       why: 'rating must be a number within 0 to 5',
     }),
     Object.freeze({
-      field: 'reviewCount', required: false, minCoverage: 0.50,
+      field: 'reviewCount', minAnyValid: true, minCoverage: 0.80,
       valid: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0,
       why: 'review count drives the viability score',
     }),
     Object.freeze({
-      field: 'lat', required: false, minCoverage: 0.90,
+      field: 'lat', minAnyValid: true, minCoverage: 0.90,
       valid: (v) => typeof v === 'number' && v >= -90 && v <= 90,
       why: 'coordinates feed the fallback dedupe key',
     }),
     Object.freeze({
-      field: 'lng', required: false, minCoverage: 0.90,
+      field: 'lng', minAnyValid: true, minCoverage: 0.90,
       valid: (v) => typeof v === 'number' && v >= -180 && v <= 180,
       why: 'coordinates feed the fallback dedupe key',
     }),
+    Object.freeze({
+      field: 'categories', minAnyValid: true, minCoverage: 0.80,
+      valid: (v) => Array.isArray(v) && v.length > 0 && v.every(isNonEmptyString),
+      why: 'categories drive appointment detection in scoring and the category filter',
+    }),
+    Object.freeze({
+      field: 'placeId', minAnyValid: true, minCoverage: 0.80,
+      valid: isNonEmptyString,
+      why: 'placeId is the stable Google identifier carried into the export',
+    }),
+    Object.freeze({
+      field: 'address', minAnyValid: true, minCoverage: 0.80,
+      valid: isNonEmptyString,
+      why: 'address is exported and read aloud when qualifying a lead',
+    }),
   ]),
 });
+
+const EARTH_RADIUS_KM = 6371;
+
+function distanceKm(a, b) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(h));
+}
 
 /**
  * Assert that a payload still matches the pinned index map.
@@ -178,15 +222,11 @@ export const CANARY_RULES = Object.freeze({
  * Called once before a run begins, against the first real page. Returns problems
  * rather than throwing so the caller can show them to the operator.
  *
- * Checks three separate things, because presence alone is not enough:
- *   1. Records exist at the mapped container and wrapper indices.
- *   2. FORMAT: any value that IS present must look like the field it claims to be.
- *      This is what catches a shift onto a populated but wrong field, which a
- *      presence check waves straight through.
- *   3. COVERAGE: enough records carry each field, judged only once the sample is
- *      big enough that a fraction means something.
+ * `expect.lat` and `expect.lng` are the coordinates we queried. Supplying them
+ * enables the proximity check, which is the only thing that catches a lat/lng
+ * swap. Omitting them skips that check and says so in the result.
  */
-export function runCanary(parsed) {
+export function runCanary(parsed, expect = {}) {
   const problems = [];
   const container = at(parsed, PAYLOAD_MAP.records);
 
@@ -207,11 +247,11 @@ export function runCanary(parsed) {
   }
 
   const judgeCoverage = records.length >= CANARY_RULES.minRecordsToJudgeCoverage;
+  const judgeAnyValid = records.length >= CANARY_RULES.minRecordsToRequireAnyValid;
 
   for (const rule of CANARY_RULES.fields) {
     const path = PAYLOAD_MAP.record[rule.field];
     const values = records.map((r) => at(r, path));
-
     const present = values.filter((v) => v !== null && v !== undefined);
     const malformed = present.filter((v) => !rule.valid(v));
 
@@ -232,6 +272,35 @@ export function runCanary(parsed) {
       continue;
     }
 
+    // Total loss is unambiguous at any sample size above one, so it does not wait
+    // for the coverage threshold. This is the small-page blind spot.
+    if (rule.minAnyValid && judgeAnyValid && present.length === 0) {
+      problems.push(
+        `${rule.field} at index path [${path}] is absent on ALL ${records.length} `
+        + `records, which is total field loss rather than sparse data (${rule.why})`
+      );
+      continue;
+    }
+
+    if (rule.mustDifferFrom) {
+      for (const other of rule.mustDifferFrom) {
+        const otherPath = PAYLOAD_MAP.record[other];
+        if (!otherPath) continue;
+        const collisions = records.filter((r) => {
+          const a = at(r, path);
+          const b = at(r, otherPath);
+          return a !== null && b !== null && a === b;
+        });
+        if (collisions.length > records.length / 2) {
+          problems.push(
+            `${rule.field} at [${path}] holds the same value as ${other} at `
+            + `[${otherPath}] on ${collisions.length} of ${records.length} records, `
+            + `which means the indices have shifted (${rule.why})`
+          );
+        }
+      }
+    }
+
     if (judgeCoverage) {
       const coverage = present.length / records.length;
       if (coverage < rule.minCoverage) {
@@ -244,10 +313,39 @@ export function runCanary(parsed) {
     }
   }
 
+  // Proximity. Catches a lat/lng swap, which no range check can: a longitude of
+  // 72 is a perfectly valid latitude.
+  let proximityJudged = false;
+  if (Number.isFinite(expect.lat) && Number.isFinite(expect.lng)) {
+    const centre = { lat: expect.lat, lng: expect.lng };
+    const coords = records
+      .map((r) => ({ lat: at(r, PAYLOAD_MAP.record.lat), lng: at(r, PAYLOAD_MAP.record.lng) }))
+      .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+
+    if (coords.length > 0) {
+      proximityJudged = true;
+      const near = coords.filter((c) => distanceKm(centre, c) <= CANARY_RULES.maxDistanceFromQueryKm);
+      if (near.length < coords.length * CANARY_RULES.minRecordsNearQuery) {
+        const swapped = coords.filter(
+          (c) => distanceKm(centre, { lat: c.lng, lng: c.lat }) <= CANARY_RULES.maxDistanceFromQueryKm
+        );
+        problems.push(
+          `only ${near.length} of ${coords.length} records sit within `
+          + `${CANARY_RULES.maxDistanceFromQueryKm} km of the queried point `
+          + `(${expect.lat}, ${expect.lng}).`
+          + (swapped.length > near.length
+            ? ' They DO fit when latitude and longitude are exchanged, so those two indices have swapped.'
+            : ' The coordinate indices have drifted.')
+        );
+      }
+    }
+  }
+
   return {
     ok: problems.length === 0,
     problems,
     sampled: records.length,
     coverageJudged: judgeCoverage,
+    proximityJudged,
   };
 }

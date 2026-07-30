@@ -163,6 +163,92 @@ test('a small sample skips coverage floors but still enforces identity fields', 
   assert.equal(runCanary(broken).ok, false, 'a missing name must fail even on one record');
 });
 
+test('CRITICAL GAP 1: total field loss is caught even below the coverage sample size', () => {
+  // A four-record page skips coverage percentages, and an earlier version let a
+  // complete wipeout of phone, rating, reviewCount, lat and lng report healthy.
+  // A niche keyword in a small town legitimately returns four results, so this
+  // window is reachable in normal use.
+  const four = []; four[64] = GOOD[64].slice(0, 4).map((e) => structuredClone(e));
+  for (const entry of four[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[178] = null; r[4] = null; r[9] = null;
+  }
+  const result = runCanary(four);
+  assert.equal(result.coverageJudged, false, 'four records is below the coverage threshold');
+  assert.equal(result.ok, false, 'total loss must still abort at a small sample size');
+  assert.ok(result.problems.some((p) => /ALL 4 records/.test(p)));
+});
+
+test('a single record is too noisy to judge total loss, and says so', () => {
+  const one = []; one[64] = [structuredClone(GOOD[64][0])];
+  one[64][0][PAYLOAD_MAP.recordWrapper][178] = null;
+  const result = runCanary(one);
+  assert.equal(result.ok, true, 'one business genuinely lacking a phone is not drift');
+});
+
+test('CRITICAL GAP 2: a lat/lng swap is caught by proximity to the queried point', () => {
+  // Range checks cannot catch this: a longitude of 72 is a valid latitude, which
+  // is true for most of the inhabited world.
+  const swapped = structuredClone(GOOD);
+  for (const entry of swapped[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    const lat = r[9][2]; const lng = r[9][3];
+    r[9][2] = lng; r[9][3] = lat;
+  }
+  const blind = runCanary(swapped);
+  assert.equal(blind.proximityJudged, false, 'without a query point there is nothing to compare against');
+
+  const seeing = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(seeing.proximityJudged, true);
+  assert.equal(seeing.ok, false, 'a coordinate swap must abort');
+  assert.ok(seeing.problems.some((p) => /exchanged/i.test(p)),
+    'the message should name the swap, not just report distance');
+});
+
+test('proximity passes when coordinates genuinely surround the queried point', () => {
+  const result = runCanary(GOOD, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(result.ok, true, `unexpected problems: ${result.problems.join('; ')}`);
+  assert.equal(result.proximityJudged, true);
+});
+
+test('CRITICAL GAP 3: a plausible non-CID string landing in name is caught by cross-field identity', () => {
+  // The sharpest case. An address string in the name slot is non-empty and not a
+  // CID, so every format check passes. Only comparing fields against each other
+  // reveals the shift.
+  const shifted = structuredClone(GOOD);
+  for (const entry of shifted[64]) {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[11] = r[18];
+  }
+  const { ok, problems } = runCanary(shifted);
+  assert.equal(ok, false, 'name holding the address value means the indices shifted');
+  assert.ok(problems.some((p) => /same value as address/i.test(p)));
+});
+
+test('the phone coverage floor sits near its live baseline, not far below it', () => {
+  // Measured 98% live. An earlier 50% floor meant a drift halving real coverage
+  // on the field the operator dials raised no alarm.
+  const phoneRule = CANARY_RULES.fields.find((f) => f.field === 'phone');
+  assert.ok(phoneRule.minCoverage >= 0.75, `floor ${phoneRule.minCoverage} is too permissive`);
+
+  const halfLost = structuredClone(GOOD);
+  for (const entry of halfLost[64].slice(0, 4)) {
+    entry[PAYLOAD_MAP.recordWrapper][178] = null;
+  }
+  assert.equal(runCanary(halfLost).ok, false, 'losing half the phones must abort');
+});
+
+test('categories, placeId and address are validated, since scoring and export depend on them', () => {
+  for (const field of ['categories', 'placeId', 'address']) {
+    assert.ok(CANARY_RULES.fields.some((f) => f.field === field), `${field} has no rule`);
+  }
+  // A categories drift silently blinds appointment detection in scoring and the
+  // category filter, so it must not pass quietly.
+  const broken = structuredClone(GOOD);
+  for (const entry of broken[64]) entry[PAYLOAD_MAP.recordWrapper][13] = 'Dentist';
+  assert.equal(runCanary(broken).ok, false, 'categories as a bare string must abort');
+});
+
 test('CANARY_RULES marks name and cid as required, since they are the record identity', () => {
   const required = CANARY_RULES.fields.filter((f) => f.required).map((f) => f.field);
   assert.deepEqual(required.sort(), ['cid', 'name']);
