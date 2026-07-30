@@ -919,7 +919,19 @@ test('unknown review count scores the neutral midpoint, for licensed sources', (
     website: 'https://x.pk', websiteTech: 'wordpress',
     reviewCount: null, provenance: 'osm',
   }));
-  assert.ok(reasons.includes('review count unknown'));
+  assert.ok(reasons.includes(SCORING.viability.unknownReason));
+});
+
+test('every viability band produces a reason, so none can be added without text', () => {
+  for (const band of SCORING.viability.bands) {
+    const count = Number.isFinite(band.max) ? band.max : band.min;
+    const { reasons } = scoreLead(base({
+      website: 'https://x.pk', websiteTech: 'wordpress', reviewCount: count,
+    }));
+    const expected = band.reason.replace('{count}', count);
+    assert.ok(reasons.includes(expected),
+      `band ${band.min}..${band.max} produced no reason; got ${JSON.stringify(reasons)}`);
+  }
 });
 
 test('unreachable businesses are multiplied down', () => {
@@ -1034,14 +1046,17 @@ export const SCORING = Object.freeze({
   }),
 
   viability: Object.freeze({
-    // [minReviews, maxReviews, points]
+    // Each band carries the text that explains it. Keeping the wording beside the
+    // numbers it describes is what stops the explanation desynchronising from the
+    // score when these are retuned. {count} is substituted at render time.
     bands: Object.freeze([
-      Object.freeze([10, 300, 20]),
-      Object.freeze([301, 1000, 12]),
-      Object.freeze([1001, Infinity, 4]),
-      Object.freeze([0, 9, 8]),
+      Object.freeze({ min: 10, max: 300, points: 20, reason: '{count} reviews' }),
+      Object.freeze({ min: 301, max: 1000, points: 12, reason: '{count} reviews, established' }),
+      Object.freeze({ min: 1001, max: Infinity, points: 4, reason: '{count} reviews, likely has an agency' }),
+      Object.freeze({ min: 0, max: 9, points: 8, reason: 'only {count} reviews' }),
     ]),
     unknown: 12,
+    unknownReason: 'review count unknown',
   }),
 
   modifiers: Object.freeze({
@@ -1126,17 +1141,16 @@ function bookingGap(lead, reasons) {
 function viability(lead, reasons) {
   const count = lead.reviewCount;
   if (count === null) {
-    reasons.push('review count unknown');
+    reasons.push(SCORING.viability.unknownReason);
     return SCORING.viability.unknown;
   }
-  for (const [min, max, points] of SCORING.viability.bands) {
-    if (count >= min && count <= max) {
-      if (points === 20) reasons.push(`${count} reviews`);
-      else if (count > 1000) reasons.push(`${count} reviews, likely has an agency`);
-      else if (count < 10) reasons.push(`only ${count} reviews`);
-      return points;
+  for (const band of SCORING.viability.bands) {
+    if (count >= band.min && count <= band.max) {
+      reasons.push(band.reason.replace('{count}', count));
+      return band.points;
     }
   }
+  reasons.push(SCORING.viability.unknownReason);
   return SCORING.viability.unknown;
 }
 
@@ -1287,6 +1301,34 @@ test('mobile, booking, chatbot and email tri-states filter', () => {
   assert.equal(run([lead({ email: 'a@b.com' }), lead()], { hasEmail: 'yes' }).length, 1);
 });
 
+test('a "no X" filter never returns a lead whose X was never inspected', () => {
+  // An unenriched null means "we have not looked". Treating it as confirmed
+  // absent would put un-inspected businesses into a list the operator trusts.
+  const FIELD_FOR = {
+    hasEmail: 'email', hasSocials: 'socials', hasBooking: 'hasBooking',
+    hasChatbot: 'hasChatbot', ownerReplies: 'ownerReplies',
+  };
+  for (const [filterKey, field] of Object.entries(FIELD_FOR)) {
+    const unlooked = lead({ enriched: false, [field]: null });
+    const looked = lead({ enriched: true, [field]: null });
+    const out = run([unlooked, looked], { [filterKey]: 'no' }).map((l) => l.name);
+    assert.deepEqual(out, [looked.name],
+      `${filterKey} leaked an un-inspected lead into a 'no' filter`);
+  }
+});
+
+test('mobileFriendly no returns both outright failures and partial sites', () => {
+  const fails = lead({ mobileFriendly: false });
+  const partial = lead({ mobileFriendly: 'partial' });
+  const passes = lead({ mobileFriendly: true });
+  const unknown = lead({ mobileFriendly: null });
+  const names = run([fails, partial, passes, unknown], { mobileFriendly: 'no' })
+    .map((l) => l.name).sort();
+  assert.deepEqual(names, [fails.name, partial.name].sort());
+  assert.deepEqual(run([fails, partial, passes, unknown], { mobileFriendly: 'yes' })
+    .map((l) => l.name), [passes.name]);
+});
+
 test('ownerReplies tri-state filters', () => {
   assert.equal(run([lead({ ownerReplies: true }), lead({ ownerReplies: false })], { ownerReplies: 'yes' }).length, 1);
 });
@@ -1398,6 +1440,20 @@ export const DEFAULT_FILTER_STATE = Object.freeze({
   sortDir: -1,
 });
 
+/**
+ * Fold a nullable enrichment value into a tri-value.
+ *
+ * A null on an UNENRICHED lead means "we have not looked", and that must never
+ * satisfy a "no X" filter: it would put un-inspected businesses into a list the
+ * operator believes is verified. The same null on an ENRICHED lead does mean
+ * confirmed absent, because enrichment ran and found nothing.
+ */
+function presence(lead, value) {
+  const hasValue = Array.isArray(value) ? value.length > 0 : Boolean(value);
+  if (hasValue) return true;
+  return lead.enriched ? false : null;
+}
+
 function triState(setting, value) {
   if (setting === 'any') return true;
   if (setting === 'yes') return value === true;
@@ -1434,15 +1490,23 @@ export function filterLeads(leads, state) {
 
     if (!triState(f.hasPhone, Boolean(l.phone))) return false;
     if (!triState(f.website, l.hasRealWebsite)) return false;
-    if (!triState(f.hasEmail, Boolean(l.email))) return false;
-    if (!triState(f.hasSocials, l.socials.length > 0)) return false;
-    if (!triState(f.ownerReplies, l.ownerReplies)) return false;
-    if (!triState(f.hasBooking, l.hasBooking)) return false;
-    if (!triState(f.hasChatbot, l.hasChatbot)) return false;
+    // All five enrichment fields go through presence() so "not looked" and
+    // "looked and absent" stay distinguishable regardless of whether the field
+    // is value-typed (email, socials) or boolean (booking, chatbot, replies).
+    if (!triState(f.hasEmail, presence(l, l.email))) return false;
+    if (!triState(f.hasSocials, presence(l, l.socials))) return false;
+    if (!triState(f.ownerReplies, presence(l, l.ownerReplies))) return false;
+    if (!triState(f.hasBooking, presence(l, l.hasBooking))) return false;
+    if (!triState(f.hasChatbot, presence(l, l.hasChatbot))) return false;
 
     // mobileFriendly is tri-valued in the data ('partial'), so it cannot use triState.
+    // A partially responsive site counts as a fails-mobile LEAD: the owner sells
+    // mobile-friendly redesigns, so anything short of properly responsive is a
+    // pitch. The scoring layer still prices partial below a full failure, which is
+    // the right place for that distinction.
     if (f.mobileFriendly === 'yes' && l.mobileFriendly !== true) return false;
-    if (f.mobileFriendly === 'no' && l.mobileFriendly !== false) return false;
+    if (f.mobileFriendly === 'no'
+      && l.mobileFriendly !== false && l.mobileFriendly !== 'partial') return false;
 
     if (f.tech.length && !f.tech.includes(l.websiteTech)) return false;
 
