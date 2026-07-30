@@ -4955,6 +4955,25 @@ export async function putLeads(leads) {
   return { inserted, merged, failed };
 }
 
+/**
+ * Close the database and drop the cached handle.
+ *
+ * Real API rather than a test hook: the worker needs it to release the handle
+ * when a run ends, and an upgrade in another tab needs the old connection gone
+ * or the new one blocks. It also makes the failed-open recovery path testable,
+ * which was previously only assertable by reading the code.
+ */
+export async function closeDb() {
+  if (!dbPromise) return;
+  try {
+    const db = await dbPromise;
+    db.close();
+  } catch {
+    // Already rejected or already closed. Either way there is nothing to release.
+  }
+  dbPromise = null;
+}
+
 export async function getAllLeads() {
   const db = await openDb();
   return wrap(tx(db, STORES.leads, 'readonly').getAll());
@@ -5030,6 +5049,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeLead } from '../src/core/schema.js';
 import {
+  openDb, closeDb,
   putLeads, getAllLeads, clearLeads,
   getExportedKeys, markExported,
   putDomainCache, getDomainCache,
@@ -5043,6 +5063,13 @@ function lead(overrides = {}) {
 }
 
 beforeEach(async () => { await clearLeads(); });
+
+test('closeDb releases the handle so a later call reopens', async () => {
+  const first = await openDb();
+  await closeDb();
+  const second = await openDb();
+  assert.notEqual(first, second, 'a closed handle must not be handed out again');
+});
 
 test('putLeads inserts new leads and reports the count', async () => {
   const result = await putLeads([lead(), lead()]);
@@ -5116,14 +5143,31 @@ test('domain cache expires an entry past its TTL', async () => {
 });
 
 test('CRITICAL: a failed open does not brick storage for the rest of the session', async () => {
-  // dbPromise used to cache a rejection forever, so one transient failure meant
-  // every later call rejected with the same stale error even after the cause was
-  // gone. Proven here by rejecting once and confirming the next call retries.
-  const db = await import('../src/store/db.js');
-  const first = await db.openDb();
-  assert.ok(first, 'a healthy open still resolves');
-  const second = await db.openDb();
-  assert.equal(first, second, 'a successful open is still cached');
+  // dbPromise used to cache a rejection forever, so ONE transient failure, a
+  // version conflict or a blocked tab, meant every later call rejected with the
+  // same stale error even after the cause was gone.
+  //
+  // The test forces a failure, then REMOVES the cause and retries. That second
+  // step is the whole point: an earlier version of this test only checked that a
+  // healthy open resolves and cached, which passes against the broken code too.
+  await closeDb();
+
+  const realOpen = indexedDB.open.bind(indexedDB);
+  indexedDB.open = () => {
+    const request = { onsuccess: null, onerror: null, onupgradeneeded: null,
+      error: new Error('simulated version conflict') };
+    queueMicrotask(() => { if (request.onerror) request.onerror(); });
+    return request;
+  };
+
+  await assert.rejects(() => openDb(), /simulated version conflict/);
+
+  indexedDB.open = realOpen;
+  const recovered = await openDb();
+  assert.ok(recovered, 'openDb must retry after a failure, not serve the cached rejection');
+
+  const again = await openDb();
+  assert.equal(recovered, again, 'a successful open is still cached');
 });
 
 test('one unstorable lead does not silently drop the rest of the batch', async () => {
