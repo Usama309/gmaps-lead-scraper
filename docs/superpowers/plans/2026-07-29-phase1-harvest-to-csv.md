@@ -469,6 +469,17 @@ export const CONFIG = deepFreeze({
     // An absolute ceiling, so a high baseline cannot switch detection off
     // altogether. Recon saw 980 ms normally and 2.2 s under burst.
     absoluteLatencyCeilingMs: 15000,
+    // Below this, latency variation is ordinary noise rather than pressure. Without
+    // it, a leg whose first pages happened to be fast set a baseline near 160 ms and
+    // then treated recon's own NORMAL 980 ms as a breach. Set above recon's observed
+    // burst figure of 2.2 s and well above its 980 ms baseline, so a genuinely
+    // degraded multi-second response still counts.
+    latencyPressureFloorMs: 3000,
+    // Consecutive breaching samples required before acting. One stalled request is
+    // a hiccup; three in a row is a trend. The counter resets on any sample below
+    // the floor, so a single spike cannot accumulate its way to a halt through a
+    // slowly decaying average.
+    consecutiveBreachesToHalt: 3,
   },
 
   enrich: {
@@ -2928,13 +2939,51 @@ test('a slowdown beginning during warmup breaches on the relative check alone', 
   // which is what makes this case separating rather than merely slow.
   const watch = createLatencyWatch();
   let breached = false;
-  for (const ms of [900, 900, 4000, 4000, 4000, 4000, 4000, 4000]) {
+  // Long enough for the smoothed average to converge and then clear the streak
+  // requirement. A halt now takes several consecutive elevated samples rather than
+  // one, because it stops the whole run.
+  for (const ms of [900, 900, ...Array(14).fill(4000)]) {
     breached = watch.observe(ms) || breached;
   }
   assert.ok(4000 < CONFIG.guard.absoluteLatencyCeilingMs,
     'this case only separates while it stays under the ceiling');
+  assert.ok(4000 > CONFIG.guard.latencyPressureFloorMs,
+    'and only counts while it clears the noise floor');
   assert.equal(breached, true,
     'a slowdown starting during warmup must still register as pressure');
+});
+
+test('REGRESSION: a fast opening does not make normal latency look like pressure', () => {
+  // Wiring this watch to halt a run introduced a false positive. A leg whose first
+  // pages were quick set a baseline near 160ms, after which recon's own NORMAL
+  // 980ms cleared the 4x threshold and stopped the harvest.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [150, 180, 160, 900, 950, 980, 980, 980, 980, 980, 980, 980, 980]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'sub-second responses are never pressure');
+});
+
+test('REGRESSION: one stalled request does not end a healthy harvest', () => {
+  // A single 30 second stall kept the smoothed average elevated for several
+  // samples, so it accumulated consecutive breaches on its own and halted a run
+  // that was fine.
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [980, 980, 980, 980, 980, 30000, 980, 980, 980, 980, 980, 980]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, false, 'one hiccup is not a trend');
+});
+
+test('a genuinely sustained slowdown still halts', () => {
+  const watch = createLatencyWatch();
+  let breached = false;
+  for (const ms of [900, 950, 1000, 980, 900, ...Array(10).fill(20000)]) {
+    breached = watch.observe(ms) || breached;
+  }
+  assert.equal(breached, true, 'sustained multi-second responses are pressure');
 });
 
 test('the absolute ceiling covers a slowdown that begins during warmup', () => {
@@ -3100,7 +3149,10 @@ export function nextDelayMs(random = Math.random) {
 export function createLatencyWatch() {
   const {
     latencyEwmaAlpha, latencyBreachMultiple, baselineSamples, absoluteLatencyCeilingMs,
+    latencyPressureFloorMs, consecutiveBreachesToHalt,
   } = CONFIG.guard;
+
+  let consecutiveBreaches = 0;
 
 
   const warmup = [];
@@ -3141,9 +3193,25 @@ export function createLatencyWatch() {
       // window is itself contaminated by a slowdown, no relative comparison can
       // help, and this is the only thing left that fires.
 
-      // The absolute ceiling means a legitimately high baseline cannot switch
-      // detection off altogether.
-      return ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
+      // Two gates before anything counts as pressure, because this signal now halts
+      // a run rather than merely logging.
+      //
+      // The RAW sample must clear an absolute floor. Judging on the smoothed average
+      // alone let one 30 second stall keep the average elevated for several samples,
+      // accumulating consecutive "breaches" from a single hiccup.
+      //
+      // Then it must be either well above this leg's own baseline, or past the
+      // ceiling that catches a run slow from its very first page.
+      const elevated = ms > latencyPressureFloorMs;
+      const abnormal = ewma > baseline * latencyBreachMultiple || ewma > absoluteLatencyCeilingMs;
+
+      if (!elevated || !abnormal) {
+        consecutiveBreaches = 0;
+        return false;
+      }
+
+      consecutiveBreaches += 1;
+      return consecutiveBreaches >= consecutiveBreachesToHalt;
     },
   };
 }
@@ -3733,14 +3801,18 @@ export const googlePayloadSource = {
         ]);
       }
 
+      // Keep this page BEFORE deciding whether to stop. These records already cost a
+      // request and a throttle delay, and discarding them on the way out would make
+      // the safety signal itself lose data.
+      leads.push(...pageLeads);
+
       if (Number.isFinite(page.latencyMs) && latency.observe(page.latencyMs)) {
         return finish('blocked', [
-          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms), which is the `
-          + 'earliest sign of rate limiting. Stopping rather than pushing through.',
+          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms across `
+          + `${CONFIG.guard.consecutiveBreachesToHalt} consecutive pages), which is the earliest `
+          + 'sign of rate limiting. Stopping rather than pushing through.',
         ]);
       }
-
-      leads.push(...pageLeads);
 
       // Enforce the cap on RECORDS, not on the offset. Paging by 20 up to an
       // offset of 247 admits 13 full pages, which is 260 records, so the cap was
@@ -4100,6 +4172,30 @@ test('planLegs deduplicates keywords so leg ids stay unique', () => {
   assert.equal(legs.length, 1, 'whitespace-only and repeated keywords collapse to one');
 });
 
+test('progress carries the real resume point, not the loop index', async () => {
+  // The worker persists completedLegs from this payload. Recomputing it as
+  // legIndex + 1 would undo the queue's refusal to advance past a failed leg,
+  // which is what stops a resume skipping it.
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  const seen = [];
+  let n = 0;
+  await runHarvest({
+    legs, pb: '!7i20!8i0',
+    onProgress: (p) => seen.push(p.completedLegs),
+    source: {
+      id: 'fake',
+      async harvestLeg() {
+        n += 1;
+        return n === 1
+          ? { leads: [], stopReason: 'end_of_list', problems: [] }
+          : { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] };
+      },
+    },
+    delay: async () => {},
+  });
+  assert.deepEqual(seen, [1, 1, 1], 'stops advancing at the first failure and stays there');
+});
+
 test('runHarvest reports progress per leg', async () => {
   const { legs } = planLegs({ keywords: ['a', 'b'], ...CENTRE, radiusKm: 2 });
   const seen = [];
@@ -4337,8 +4433,17 @@ export async function runHarvest({
     // would make a streaming consumer write the same business several times.
     if (fresh.length > 0) onLeads(fresh);
 
+    // Updated BEFORE progress is reported, because the worker persists the number
+    // from that payload as the resume point. Reporting the pre-update value made
+    // every run's first progress message claim zero legs done.
+    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
+      if (firstFailedLeg === null) firstFailedLeg = i;
+    }
+    completedLegs = firstFailedLeg ?? (i + 1);
+
     onProgress({
       legIndex: i,
+      completedLegs,
       totalLegs: legs.length,
       leg,
       legLeads: result.leads.length,
@@ -4353,11 +4458,6 @@ export async function runHarvest({
     if (HALTING_REASONS.includes(result.stopReason)) {
       return finish(result.stopReason);
     }
-
-    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
-      if (firstFailedLeg === null) firstFailedLeg = i;
-    }
-    completedLegs = firstFailedLeg ?? (i + 1);
 
     if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
@@ -4532,6 +4632,14 @@ test('renders booleans as yes and no, not true and false', () => {
   assert.ok(csv.includes('yes'));
 });
 
+test('an empty enrichment value renders blank instead of aborting the export', () => {
+  // Validating an empty string threw, which aborted the ENTIRE export over one
+  // blank field. A blank cell is a far better outcome than no file at all.
+  const csv = toCsv([row({ email: '', socials: [] })]);
+  assert.equal(cellOf(csv, 'Email'), '');
+  assert.equal(cellOf(csv, 'Social links'), '');
+});
+
 test('renders unknown enrichment as unknown, distinct from no', () => {
   const csv = toCsv([row({ mobileFriendly: null })]);
   const cells = csv.split(NL)[1];
@@ -4650,10 +4758,14 @@ function renderCell(value) {
 
 function renderEnrichmentCell(key, value) {
   if (value === null || value === undefined) return 'unknown';
-  // An empty array is "we looked and found none", which renders like any empty list.
-  if (Array.isArray(value) && value.length === 0) return '';
 
   const rule = ENRICHMENT_VALUES.get(key);
+
+  // An empty string or empty array is "we looked and found none". Validating it
+  // would throw and abort the ENTIRE export over one blank field, which is a far
+  // worse outcome than rendering a blank cell.
+  if (value === '' || (Array.isArray(value) && value.length === 0)) return '';
+
   if (!rule.allows(value)) {
     throw new Error(
       `${key} held ${JSON.stringify(value)}, which is not ${rule.describe} or null. `
@@ -5872,7 +5984,10 @@ async function startRun(config) {
       onProgress: (p) => {
         broadcast(MSG.RUN_PROGRESS, p);
         pendingWrites = pendingWrites
-          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }))
+          // p.completedLegs, not legIndex + 1. The queue deliberately stops advancing
+          // that number past a failed leg so a resume retries it; recomputing it here
+          // would undo exactly that.
+          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.completedLegs }))
           .catch(() => {});
       },
     });
