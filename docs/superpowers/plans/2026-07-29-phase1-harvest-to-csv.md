@@ -2207,6 +2207,17 @@ test('a swap whose values BOTH stay in range aborts on the ordering invariant', 
   assert.ok(problems.some((p) => /smaller than rating|swapped/i.test(p)));
 });
 
+test('every canary threshold is a named constant, not an inline literal', () => {
+  // The project rule is that tunables live in one place. An inline 0.9 in the
+  // ordering check was the one threshold not reachable from CANARY_RULES.
+  for (const key of [
+    'minRecordsToJudgeCoverage', 'minRecordsToRequireAnyValid', 'minRecordsNearQuery',
+    'maxFieldCollisionRatio', 'minOrderedRatio', 'maxDistanceFromQueryKm',
+  ]) {
+    assert.equal(typeof CANARY_RULES[key], 'number', `${key} must be a named threshold`);
+  }
+});
+
 test('the ordering invariant tolerates a genuinely tiny business', () => {
   // A brand new listing with 4 reviews and a 4.0 rating is real, not drift.
   const tiny = structuredClone(GOOD);
@@ -2426,6 +2437,10 @@ export const CANARY_RULES = Object.freeze({
   // Two mapped fields holding the same value on more than a quarter of records
   // means the indices collided. Genuine data essentially never does this.
   maxFieldCollisionRatio: 0.25,
+  // Fraction of records whose reviewCount must be at least its rating. A real
+  // business has more reviews than its rating is high, so a page that mostly
+  // violates the ordering means those two indices swapped.
+  minOrderedRatio: 0.9,
   // A record's coordinates should sit near the point we queried. A lat/lng swap
   // passes both range checks whenever |longitude| is under 90, which covers most
   // of the inhabited world, so range validation alone cannot catch it.
@@ -2598,7 +2613,7 @@ export function runCanary(parsed, expect = {}) {
 
   if (paired.length > 0) {
     const ordered = paired.filter((v) => v.reviewCount >= v.rating);
-    if (ordered.length < paired.length * 0.9) {
+    if (ordered.length < paired.length * CANARY_RULES.minOrderedRatio) {
       problems.push(
         `reviewCount is smaller than rating on ${paired.length - ordered.length} of `
         + `${paired.length} records. Real businesses have more reviews than their `
