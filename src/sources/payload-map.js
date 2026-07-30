@@ -68,31 +68,123 @@ export function extractRecord(raw) {
   });
 }
 
-/** Read every record out of a parsed payload. Holes and malformed entries are skipped. */
-export function extractRecords(parsed) {
+/**
+ * Read every record out of a parsed payload.
+ *
+ * Returns counts alongside the leads, because three very different situations
+ * would otherwise collapse into one empty array: no container at all, a container
+ * that is legitimately empty (the normal end of a leg), and a container full of
+ * records that ALL failed extraction. The harvester treats an empty record list
+ * as end-of-list, so without rawCount an index drift that broke every record
+ * would look exactly like a completed search.
+ */
+export function extractPage(parsed) {
   const container = at(parsed, PAYLOAD_MAP.records);
-  if (!Array.isArray(container)) return [];
+  if (!Array.isArray(container)) return { leads: [], rawCount: 0, skipped: 0 };
 
   const leads = [];
+  let rawCount = 0;
+  let skipped = 0;
+
   for (const entry of container) {
     const raw = at(entry, [PAYLOAD_MAP.recordWrapper]);
     if (!raw) continue;
+    rawCount += 1;
     try {
       const lead = extractRecord(raw);
       if (lead.name) leads.push(lead);
+      else skipped += 1;
     } catch {
-      // A record we cannot even derive a key for is unusable. Skipping one bad
-      // record is correct; the canary catches the case where they are ALL bad.
+      // A record we cannot derive a key for is unusable. Skipping one is correct.
+      // The caller compares rawCount against leads.length to catch the case where
+      // they are ALL unusable, which is drift rather than bad luck.
+      skipped += 1;
     }
   }
-  return leads;
+
+  return { leads, rawCount, skipped };
 }
+
+/** Convenience wrapper for callers that only need the leads. */
+export function extractRecords(parsed) {
+  return extractPage(parsed).leads;
+}
+
+/** A Google CID looks like 0x<hex>:0x<hex>. Used to validate, and to detect shifts. */
+const CID_PATTERN = /^0x[0-9a-f]+:0x[0-9a-f]+$/i;
+
+function countDigits(value) {
+  return (String(value).match(/\d/g) ?? []).length;
+}
+
+/**
+ * What a healthy payload looks like, field by field.
+ *
+ * Coverage floors are set well below the live measurement (98% phone, 98% rating,
+ * 67% website on 2026-07-29) so a genuinely thin market does not trip them, while
+ * a total field loss does.
+ *
+ * `required: true` means every record must carry a valid value at any sample size,
+ * because these two fields ARE the record's identity. Everything else is judged on
+ * coverage, and only once the sample is large enough for a fraction to mean anything.
+ */
+export const CANARY_RULES = Object.freeze({
+  minRecordsToJudgeCoverage: 5,
+  fields: Object.freeze([
+    Object.freeze({
+      field: 'name', required: true, minCoverage: 0.95,
+      // Rejecting CID-shaped strings is what catches a constant-offset shift:
+      // move every index by one and `name` lands on the CID hex, which is still
+      // a string and would sail past a bare typeof check.
+      valid: (v) => typeof v === 'string' && v.trim().length > 0 && !CID_PATTERN.test(v),
+      why: 'name must be a non-empty string that is not a CID',
+    }),
+    Object.freeze({
+      field: 'cid', required: true, minCoverage: 0.90,
+      valid: (v) => typeof v === 'string' && CID_PATTERN.test(v),
+      why: 'cid is the primary dedupe key; drift landing it on shared text merges distinct businesses',
+    }),
+    Object.freeze({
+      field: 'phone', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'string' && countDigits(v) >= 7,
+      why: 'phone is the field the operator actually calls; measured at 98% live',
+    }),
+    Object.freeze({
+      field: 'rating', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'number' && v >= 0 && v <= 5,
+      why: 'rating must be a number within 0 to 5',
+    }),
+    Object.freeze({
+      field: 'reviewCount', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0,
+      why: 'review count drives the viability score',
+    }),
+    Object.freeze({
+      field: 'lat', required: false, minCoverage: 0.90,
+      valid: (v) => typeof v === 'number' && v >= -90 && v <= 90,
+      why: 'coordinates feed the fallback dedupe key',
+    }),
+    Object.freeze({
+      field: 'lng', required: false, minCoverage: 0.90,
+      valid: (v) => typeof v === 'number' && v >= -180 && v <= 180,
+      why: 'coordinates feed the fallback dedupe key',
+    }),
+  ]),
+});
 
 /**
  * Assert that a payload still matches the pinned index map.
  *
  * Called once before a run begins, against the first real page. Returns problems
- * rather than throwing so the caller can present them to the operator.
+ * rather than throwing so the caller can show them to the operator.
+ *
+ * Checks three separate things, because presence alone is not enough:
+ *   1. Records exist at the mapped container and wrapper indices.
+ *   2. FORMAT: any value that IS present must look like the field it claims to be.
+ *      This is what catches a shift onto a populated but wrong field, which a
+ *      presence check waves straight through.
+ *   3. COVERAGE: enough records carry each field, judged only once the sample is
+ *      big enough that a fraction means something.
  */
 export function runCanary(parsed) {
   const problems = [];
@@ -100,31 +192,62 @@ export function runCanary(parsed) {
 
   if (!Array.isArray(container) || container.length === 0) {
     problems.push(`no records found at index path [${PAYLOAD_MAP.records}]`);
-    return { ok: false, problems };
+    return { ok: false, problems, sampled: 0 };
   }
 
-  const leads = [];
+  const records = [];
   for (const entry of container) {
     const raw = at(entry, [PAYLOAD_MAP.recordWrapper]);
-    if (raw) leads.push(raw);
+    if (raw) records.push(raw);
   }
 
-  if (leads.length === 0) {
+  if (records.length === 0) {
     problems.push(`no records found at wrapper index ${PAYLOAD_MAP.recordWrapper}`);
-    return { ok: false, problems };
+    return { ok: false, problems, sampled: 0 };
   }
 
-  const named = leads.filter((r) => typeof at(r, PAYLOAD_MAP.record.name) === 'string');
-  if (named.length === 0) {
-    problems.push(`name index [${PAYLOAD_MAP.record.name}] yielded no strings across ${leads.length} records`);
+  const judgeCoverage = records.length >= CANARY_RULES.minRecordsToJudgeCoverage;
+
+  for (const rule of CANARY_RULES.fields) {
+    const path = PAYLOAD_MAP.record[rule.field];
+    const values = records.map((r) => at(r, path));
+
+    const present = values.filter((v) => v !== null && v !== undefined);
+    const malformed = present.filter((v) => !rule.valid(v));
+
+    if (malformed.length > 0) {
+      problems.push(
+        `${rule.field} at index path [${path}] returned ${malformed.length} of `
+        + `${present.length} values in the wrong shape (${rule.why}). `
+        + `First offender: ${JSON.stringify(malformed[0]).slice(0, 60)}`
+      );
+      continue;
+    }
+
+    if (rule.required && present.length < records.length) {
+      problems.push(
+        `${rule.field} at index path [${path}] is missing on `
+        + `${records.length - present.length} of ${records.length} records (${rule.why})`
+      );
+      continue;
+    }
+
+    if (judgeCoverage) {
+      const coverage = present.length / records.length;
+      if (coverage < rule.minCoverage) {
+        problems.push(
+          `${rule.field} at index path [${path}] covered only `
+          + `${Math.round(coverage * 100)}% of ${records.length} records, `
+          + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
+        );
+      }
+    }
   }
 
-  const ratings = leads
-    .map((r) => at(r, PAYLOAD_MAP.record.rating))
-    .filter((v) => v !== null);
-  if (ratings.length > 0 && !ratings.every((v) => typeof v === 'number')) {
-    problems.push(`rating index [${PAYLOAD_MAP.record.rating}] returned a non-numeric value`);
-  }
-
-  return { ok: problems.length === 0, problems };
+  return {
+    ok: problems.length === 0,
+    problems,
+    sampled: records.length,
+    coverageJudged: judgeCoverage,
+  };
 }
