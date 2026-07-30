@@ -3121,7 +3121,8 @@ Create `tests/google-payload.test.js`:
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSource } from '../src/sources/source.js';
+import { readFileSync } from 'node:fs';
+import { assertSource, assertStopReason, STOP_REASONS } from '../src/sources/source.js';
 import { CONFIG } from '../src/core/config.js';
 import { setPbOffset, setPbCentre, googlePayloadSource } from '../src/sources/google-payload.js';
 
@@ -3161,6 +3162,28 @@ test('googlePayloadSource conforms to the source interface', () => {
 
 test('assertSource rejects an object missing harvestLeg', () => {
   assert.throws(() => assertSource({ id: 'x' }), /harvestLeg/);
+});
+
+test('assertStopReason rejects an unknown reason instead of letting it reach a caller', () => {
+  // STOP_REASONS used to be documentation nothing checked. A typo would have
+  // produced a reason no caller branches on, which falls through every branch and
+  // reads as success.
+  for (const reason of STOP_REASONS) {
+    assert.equal(assertStopReason(reason), reason);
+  }
+  assert.throws(() => assertStopReason('blockd'), /unknown stopReason/);
+  assert.throws(() => assertStopReason(undefined), /unknown stopReason/);
+});
+
+test('every stopReason harvestLeg can actually return is declared in STOP_REASONS', () => {
+  // Guards the drift the doc comment already suffered: the array gained a reason
+  // while the prose list did not. Reading the source keeps them from separating.
+  const source = readFileSync(new URL('../src/sources/google-payload.js', import.meta.url), 'utf8');
+  const returned = [...source.matchAll(/finish\('([a-z_]+)'/g)].map((m) => m[1]);
+  assert.ok(returned.length >= 6, `expected several finish() calls, found ${returned.length}`);
+  for (const reason of new Set(returned)) {
+    assert.ok(STOP_REASONS.includes(reason), `${reason} is returned but not declared`);
+  }
 });
 
 test('assertSource rejects an object missing an id', () => {
@@ -3402,11 +3425,31 @@ Create `src/sources/source.js`:
  *   id          string, stamped onto each lead as `provenance`
  *   harvestLeg  async ({ query, ...sourceSpecific }) -> { leads, stopReason, problems }
  *
- * stopReason is one of: 'end_of_list' | 'cap_reached' | 'blocked' | 'canary_failed' | 'aborted'
+ * stopReason is one of the values in STOP_REASONS below. Read that array rather than
+ * this sentence: a prose list drifts out of date the moment a reason is added, and
+ * this comment is the contract the pipeline layer relies on.
  */
 export const STOP_REASONS = Object.freeze([
   'end_of_list', 'cap_reached', 'blocked', 'canary_failed', 'aborted', 'network_error',
+  'completed', 'leg_threw',
 ]);
+
+/**
+ * Validate a stopReason at the point of return.
+ *
+ * STOP_REASONS was previously documentation that nothing checked, so a typo would
+ * have produced a reason no caller branches on. Downstream code decides whether to
+ * pause, resume or report on the strength of this string, and an unrecognised value
+ * would fall through every branch and look like success.
+ */
+export function assertStopReason(reason) {
+  if (!STOP_REASONS.includes(reason)) {
+    throw new Error(
+      `unknown stopReason "${reason}". Add it to STOP_REASONS in source.js, or fix the typo.`
+    );
+  }
+  return reason;
+}
 
 export function assertSource(candidate) {
   if (!candidate || typeof candidate !== 'object') {
@@ -3427,6 +3470,7 @@ Create `src/sources/google-payload.js`:
 
 ```js
 import { CONFIG } from '../core/config.js';
+import { assertStopReason } from './source.js';
 import { extractPage, runCanary } from './payload-map.js';
 import { classifyTransport, classifyPage, nextDelayMs } from '../pipeline/guard.js';
 
@@ -3520,8 +3564,17 @@ export const googlePayloadSource = {
     let offset = 0;
     let canaryChecked = false;
 
+    // Single exit shape. Every return goes through here, so a mistyped reason
+    // throws at the point of return instead of reaching a caller that branches on
+    // it and silently falls through to treating the run as successful.
+    const finish = (stopReason, problems = []) => ({
+      leads,
+      stopReason: assertStopReason(stopReason),
+      problems,
+    });
+
     while (offset < CONFIG.harvest.perQueryCap) {
-      if (signal?.aborted) return { leads, stopReason: 'aborted', problems: [] };
+      if (signal?.aborted) return finish('aborted');
 
       // Every exit from this loop must be a RETURN, never a throw. `leads` already
       // holds everything harvested so far, and a rejected fetch that escaped would
@@ -3533,33 +3586,29 @@ export const googlePayloadSource = {
         page = await fetchPage({ query, pb: setPbOffset(pb, offset), signal });
       } catch (error) {
         if (error?.name === 'AbortError' || signal?.aborted) {
-          return { leads, stopReason: 'aborted', problems: [] };
+          return finish('aborted');
         }
-        return {
-          leads,
-          stopReason: 'network_error',
-          problems: [`request failed at offset ${offset}: ${error?.message ?? String(error)}`],
-        };
+        return finish('network_error', [
+          `request failed at offset ${offset}: ${error?.message ?? String(error)}`,
+        ]);
       }
 
       if (!page || typeof page !== 'object') {
-        return {
-          leads,
-          stopReason: 'network_error',
-          problems: [`fetchPage returned ${page === null ? 'null' : typeof page} instead of a response`],
-        };
+        return finish('network_error', [
+          `fetchPage returned ${page === null ? 'null' : typeof page} instead of a response`,
+        ]);
       }
 
       const transport = classifyTransport(page);
 
       if (transport.state === 'blocked') {
         // Never retry through a block. Stop and let the operator decide.
-        return { leads, stopReason: 'blocked', problems: [transport.reason] };
+        return finish('blocked', [transport.reason]);
       }
 
       const parsed = parseBody(page.body);
       if (parsed === null) {
-        return { leads, stopReason: 'blocked', problems: ['payload did not parse as JSON'] };
+        return finish('blocked', ['payload did not parse as JSON']);
       }
 
       // Validate the index map against the very first real page, before trusting
@@ -3570,7 +3619,7 @@ export const googlePayloadSource = {
         // only thing that catches a latitude/longitude swap.
         const canary = runCanary(parsed, { lat, lng });
         if (!canary.ok) {
-          return { leads, stopReason: 'canary_failed', problems: canary.problems };
+          return finish('canary_failed', canary.problems);
         }
       }
 
@@ -3581,11 +3630,11 @@ export const googlePayloadSource = {
       });
 
       if (verdict.state === 'end_of_list') {
-        return { leads, stopReason: 'end_of_list', problems: [] };
+        return finish('end_of_list');
       }
 
       if (verdict.state === 'extraction_failed') {
-        return { leads, stopReason: 'canary_failed', problems: [verdict.reason] };
+        return finish('canary_failed', [verdict.reason]);
       }
 
       leads.push(...pageLeads);
@@ -3597,7 +3646,7 @@ export const googlePayloadSource = {
       if (leads.length >= CONFIG.harvest.perQueryCap) {
         leads.length = CONFIG.harvest.perQueryCap;
         onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
-        return { leads, stopReason: 'cap_reached', problems: [] };
+        return finish('cap_reached');
       }
 
       onPage({ offset, count: pageLeads.length, total: leads.length, latencyMs: page.latencyMs });
@@ -3606,7 +3655,7 @@ export const googlePayloadSource = {
       if (offset < CONFIG.harvest.perQueryCap) await delay(nextDelayMs());
     }
 
-    return { leads, stopReason: 'cap_reached', problems: [] };
+    return finish('cap_reached');
   },
 };
 ```
