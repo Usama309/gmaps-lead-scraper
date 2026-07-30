@@ -5767,19 +5767,37 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 });
 ```
 
-- [ ] **Step 8: Reload the extension and verify pb capture works live**
+- [ ] **Step 8: Verify capture from a REAL page load, not from the worker console**
 
-1. Reload the extension at `chrome://extensions`.
-2. Open `https://www.google.com/maps/search/dentist+in+Attock/`.
-3. Open the service worker console from the extension card.
-4. Run in that console: `chrome.runtime.sendMessage({type:'mapprospector/capture-pb'})` and confirm a pb string was stored.
+The obvious check here is to poke the service worker console and ask whether it holds a pb. Do not
+rely on that. An earlier version of this task shipped a content script that could not parse and could
+not reach the worker, and a worker-console poke would have passed anyway because it never exercises
+the content script at all. The whole point of this step is to run the path that was broken.
 
-Expected: the worker holds a `pb` blob over 50 characters. If not, capture is broken and no later task can work, so stop and fix it here.
+1. Reload the extension at `chrome://extensions`. Confirm no errors are listed on the card. A content
+   script that fails to parse reports there and in the page console, not in the worker console.
+2. Open `https://www.google.com/maps/search/dentist+in+Attock/` and let it load.
+3. Open DevTools on THAT PAGE, not the worker, and in the page console run:
+   `window.__mapProspectorPatched`
+   It must return an object. `undefined` means the MAIN world script never installed, which is the
+   exact failure mode that was invisible before.
+4. Still in the page console, confirm the patch is live rather than merely installed:
+   `window.fetch.name`
+   It must read `observedFetch`.
+5. Now open the service worker console from the extension card and confirm the captured value
+   actually arrived through the bridge:
+   `chrome.storage.session.get('latestPb').then(console.log)`
+   It must show a string longer than 50 characters. If step 3 passed and this does not, the MAIN
+   world script is observing but the bridge is not relaying.
+6. Confirm the page console shows no uncaught errors from either content script.
+
+Record the actual returned values in your report. If any step fails, stop: every later task depends
+on this path and no amount of unit testing substitutes for it.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/core/messages.js src/content/capture.js background.js manifest.json tests/messages.test.js
+git add -A src/core/messages.js src/content/ background.js manifest.json tests/messages.test.js
 git commit -m "feat: capture live search parameters and route worker messages"
 ```
 
@@ -6119,9 +6137,15 @@ Expected: every test passing across all modules.
 
 This is the step that proves the phase. Do not skip it and do not report the phase complete without its actual output.
 
-1. Reload the extension.
-2. Open `https://www.google.com/maps/search/dentist+in+Attock/` and let it load, so the pb blob is captured.
-3. Click the toolbar icon to open the side panel.
+1. Reload the extension. Confirm the `chrome://extensions` card lists no errors.
+2. Open `https://www.google.com/maps/search/dentist+in+Attock/` and let it load.
+3. VERIFY THE CAPTURE PATH BEFORE ANYTHING ELSE, from the PAGE console rather than the worker
+   console. `window.__mapProspectorPatched` must be an object and `window.fetch.name` must read
+   `observedFetch`. Then from the worker console,
+   `chrome.storage.session.get('latestPb').then(console.log)` must show a string over 50 characters.
+   A worker-console check alone would pass even if the content script never ran, which is precisely
+   how an earlier version of this hid a fatal fault, so do all three.
+4. Click the toolbar icon to open the side panel.
 4. Set keywords to `dentist`, coordinates to `33.7609824 / 72.342874`, radius to **2 km** for the first run. Start small: a 2 km radius is one leg, which verifies the pipeline without a long throttled run.
 5. Watch the log. Expected: leg progress lines, then `finished: end_of_list` or `cap_reached` with a non-zero unique count.
 6. Click "Open dashboard".
