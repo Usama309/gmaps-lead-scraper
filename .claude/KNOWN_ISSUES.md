@@ -1,6 +1,21 @@
 # Known Issues
 
 ## Open
+- The payload canary's field-collision sweep is anchored on `return finish(` and on literal
+  arguments, so a comment containing that exact string, or a call passing a variable, would not be
+  counted. Ruled acceptable: the separate `handBuilt === 0` assertion is independent of the pattern,
+  so protection does not rest on it.
+- `effectiveRadiusKm` understates real coverage slightly, because a query fired at the outermost kept
+  tile can still return businesses beyond it. Conservative rather than misleading.
+- Truncating the tile plan can leave an angularly uneven bite out of the boundary ring rather than a
+  clean circle, since candidates are sorted by distance without regard to bearing.
+- Google exposes review dates as relative text only, so last-review precision beyond roughly four
+  weeks is approximate. Not fixable from our side.
+- Mobile friendliness is a heuristic from a single HTML fetch rather than a PageSpeed verdict, and is
+  labelled as such in the UI. A deep check on a shortlist is a Phase 2 candidate.
+- `.keys/extension.pem` pins the extension ID and is gitignored, so it is not backed up anywhere.
+  Losing it changes the ID and breaks the Phase 4 Sheets OAuth client. Copy it somewhere safe.
+
 - Google review dates are relative text only, so last-review precision beyond roughly
   four weeks is approximate. Documented in the spec, not fixable.
 - Mobile-friendliness is a heuristic from a single HTML fetch, not a PageSpeed verdict.

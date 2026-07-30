@@ -1,6 +1,27 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+- [2026-07-30 05:30 PM] Phase 1 complete in code: harvest, dedupe, score, filter and CSV export,
+  across 14 tasks and 242 passing tests
+- [2026-07-30 05:30 PM] `docs/FIRST-RUN.md`, the operator checklist for the live verification, which
+  is the one Phase 1 step no agent performed
+- [2026-07-30 05:30 PM] `docs/superpowers/journal/`, the build journal recording all 41 review
+  findings with the ruling and reasoning behind each
+
+### Fixed
+- [2026-07-30 05:30 PM] Seven defects that would have shipped silently rather than as errors. Named
+  individually in the build journal; the sharpest were a blocked leg being skipped on every future
+  resume, spreadsheet formula injection through business names, and a content script that could not
+  parse so capture was inert while reading correctly
+
+### Security
+- [2026-07-30 05:30 PM] CSV cells beginning with a formula trigger are neutralised, since Google
+  Maps listing names are attacker-registrable and the export opens directly in a spreadsheet.
+  Numbers are exempt so coordinates stay numeric
+- [2026-07-30 05:30 PM] Every Google request uses `credentials: 'omit'`, so no account is attached
+
 ### Added
 - [2026-07-29 04:00 PM] Design spec and Phase 1 implementation plan
 - [2026-07-30 12:00 PM] Config, identity, schema, scoring, filter, tiling, payload mapping,
