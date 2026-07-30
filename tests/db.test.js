@@ -1,0 +1,104 @@
+import 'fake-indexeddb/auto';
+import { test, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { makeLead } from '../src/core/schema.js';
+import {
+  putLeads, getAllLeads, clearLeads,
+  getExportedKeys, markExported,
+  putDomainCache, getDomainCache,
+  saveRun, loadRun, listRuns,
+} from '../src/store/db.js';
+
+let n = 0;
+function lead(overrides = {}) {
+  n += 1;
+  return makeLead({ cid: `0xaa${n}:0xbb${n}`, name: `Business ${n}`, phone: '+92 300 000 0000', ...overrides });
+}
+
+beforeEach(async () => { await clearLeads(); });
+
+test('putLeads inserts new leads and reports the count', async () => {
+  const result = await putLeads([lead(), lead()]);
+  assert.equal(result.inserted, 2);
+  assert.equal(result.merged, 0);
+  assert.equal((await getAllLeads()).length, 2);
+});
+
+test('putLeads merges on re-put instead of duplicating', async () => {
+  const a = lead({ rating: 4.3, reviewCount: 87 });
+  await putLeads([a]);
+
+  const enriched = makeLead({
+    cid: a.cid, name: a.name, website: 'https://x.wixsite.com',
+    enriched: true, websiteTech: 'wix', mobileFriendly: false,
+  });
+  const result = await putLeads([enriched]);
+
+  assert.equal(result.inserted, 0);
+  assert.equal(result.merged, 1, 'the same business must not create a second row');
+
+  const stored = await getAllLeads();
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].websiteTech, 'wix', 'enrichment must land');
+  assert.equal(stored[0].rating, 4.3, 'an incoming null must not erase the stored rating');
+});
+
+test('markExported and getExportedKeys round trip, powering cross-run dedupe', async () => {
+  const a = lead(); const b = lead();
+  await putLeads([a, b]);
+  await markExported([a.key], 'run-1');
+
+  const exported = await getExportedKeys();
+  assert.ok(exported instanceof Set);
+  assert.ok(exported.has(a.key));
+  assert.ok(!exported.has(b.key));
+});
+
+test('exported keys survive a leads wipe, because they track history not state', async () => {
+  const a = lead();
+  await putLeads([a]);
+  await markExported([a.key]);
+  await clearLeads();
+  assert.ok((await getExportedKeys()).has(a.key));
+});
+
+test('domain cache returns stored data on a hit', async () => {
+  await putDomainCache('alshifa.pk', { tech: 'wordpress', mobileFriendly: false });
+  assert.deepEqual(await getDomainCache('alshifa.pk'), { tech: 'wordpress', mobileFriendly: false });
+});
+
+test('domain cache returns null on a miss', async () => {
+  assert.equal(await getDomainCache('never-fetched.pk'), null);
+});
+
+test('domain cache expires an entry past its TTL', async () => {
+  // Write a deliberately stale record straight through putDomainCache, then age it
+  // by rewriting cachedAt. Uses the real TTL from config rather than a literal.
+  const { CONFIG } = await import('../src/core/config.js');
+  await putDomainCache('stale.pk', { tech: 'wix' });
+
+  const db = await (await import('../src/store/db.js')).openDb();
+  const store = db.transaction('domainCache', 'readwrite').objectStore('domainCache');
+  const ancient = new Date(Date.now() - (CONFIG.enrich.domainCacheTtlDays + 1) * 86400000);
+  await new Promise((resolve, reject) => {
+    const req = store.put({ domain: 'stale.pk', data: { tech: 'wix' }, cachedAt: ancient.toISOString() });
+    req.onsuccess = resolve; req.onerror = () => reject(req.error);
+  });
+
+  assert.equal(await getDomainCache('stale.pk'), null, 'a stale entry must read as a miss');
+});
+
+test('runs round trip so a blocked job can resume', async () => {
+  await saveRun({ id: 'run-7', config: { keywords: ['dentist'] }, completedLegs: 3 });
+  const loaded = await loadRun('run-7');
+  assert.equal(loaded.completedLegs, 3);
+  assert.deepEqual(loaded.config.keywords, ['dentist']);
+  assert.ok((await listRuns()).some((r) => r.id === 'run-7'));
+});
+
+test('saveRun overwrites the same id rather than appending', async () => {
+  await saveRun({ id: 'run-8', completedLegs: 1 });
+  await saveRun({ id: 'run-8', completedLegs: 5 });
+  assert.equal((await loadRun('run-8')).completedLegs, 5);
+  assert.equal((await listRuns()).filter((r) => r.id === 'run-8').length, 1);
+});
