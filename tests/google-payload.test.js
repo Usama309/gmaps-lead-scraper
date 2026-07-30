@@ -291,6 +291,10 @@ function payloadWith(count) {
     r[13] = ['Dentist'];
     r[78] = `ChIJFakePlace${i}`;
     r[18] = `Street ${i}, Attock, Punjab`;
+    // Two thirds carry a website, matching the 67% measured live. The canary
+    // requires at least one, since a total loss of this field would make every
+    // business look like a perfect no-website lead.
+    if (i % 3 !== 0) r[7] = [`https://business${i}.pk/`, `business${i}.pk`];
     records.push([null, r]);
   }
   const p = []; p[64] = records;

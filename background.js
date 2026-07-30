@@ -77,6 +77,12 @@ async function startRun(config) {
 
     await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
 
+    // Announced at the START, not only in the final response. A wide run takes
+    // minutes on a single awaited message, so a warning delivered at the end is lost
+    // if the panel closes or the worker is evicted, and the operator would never
+    // learn their search area was cut.
+    broadcast(MSG.RUN_COVERAGE, coverage);
+
     const result = await runHarvest({
       legs,
       pb,

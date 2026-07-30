@@ -226,6 +226,15 @@ export const CANARY_RULES = Object.freeze({
       why: 'categories drive appointment detection in scoring and the category filter',
     }),
     Object.freeze({
+      // No coverage floor on purpose. Live coverage was 67% and a thin market could
+      // be lower, so a percentage here would cry wolf. But total loss must still
+      // abort: this field carries 40 of the 100 score points and the flagship
+      // filter, so a drift here makes EVERY business look like a perfect lead.
+      field: 'website', minAnyValid: true,
+      valid: (v) => typeof v === 'string' && /^https?:\/\//i.test(v),
+      why: 'website drives the largest score component and the no-website filter',
+    }),
+    Object.freeze({
       field: 'placeId', minAnyValid: true, minCoverage: 0.80, minUniqueRatio: 0.95,
       valid: looksLikePlaceId,
       why: 'placeId is the stable Google identifier carried into the export',

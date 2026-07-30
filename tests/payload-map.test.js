@@ -298,6 +298,39 @@ test('categories, placeId and address are validated, since scoring and export de
   assert.equal(runCanary(broken).ok, false, 'categories as a bare string must abort');
 });
 
+test('website has a canary rule requiring at least one valid record, but deliberately no coverage floor', () => {
+  // Live coverage was 67% and a thin market could be lower, so a percentage
+  // threshold here would cry wolf. But this field carries 40 of the 100 score
+  // points and the flagship filter, so total loss must still abort.
+  const websiteRule = CANARY_RULES.fields.find((f) => f.field === 'website');
+  assert.ok(websiteRule, 'website has no rule');
+  assert.equal(websiteRule.minAnyValid, true);
+  assert.equal(websiteRule.minCoverage, undefined,
+    'website coverage varies by market and must not have a floor');
+});
+
+test('canary FAILS when website is absent on every record, since it drives the largest score component', () => {
+  const noWebsite = structuredClone(GOOD);
+  for (const entry of noWebsite[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][7] = null;
+  }
+  const { ok, problems } = runCanary(noWebsite);
+  assert.equal(ok, false, 'total website loss must not pass');
+  assert.ok(problems.some((p) => /website/i.test(p)));
+});
+
+test('canary does not fail on thin website coverage, since a niche market can genuinely have few sites', () => {
+  // Only one of eight records carries a website. There is deliberately no
+  // coverage floor on this field, so sparse-but-nonzero coverage must not be
+  // treated as drift.
+  const thin = structuredClone(GOOD);
+  for (const entry of thin[64].slice(1)) {
+    entry[PAYLOAD_MAP.recordWrapper][7] = null;
+  }
+  const { ok, problems } = runCanary(thin);
+  assert.equal(ok, true, `unexpected problems: ${problems.join('; ')}`);
+});
+
 test('a phone and placeId SWAP aborts, since both would otherwise look valid', () => {
   // The hardest class: two fields exchange values and each still passes a loose
   // validator. A digit-heavy place ID satisfied "has seven digits" and a phone

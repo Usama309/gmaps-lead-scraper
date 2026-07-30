@@ -1,7 +1,7 @@
 import { CONFIG } from '../core/config.js';
 import { assertStopReason } from './source.js';
 import { extractPage, runCanary } from './payload-map.js';
-import { classifyTransport, classifyPage, nextDelayMs } from '../pipeline/guard.js';
+import { classifyTransport, classifyPage, nextDelayMs, createLatencyWatch } from '../pipeline/guard.js';
 
 const SEARCH_ENDPOINT = 'https://www.google.com/search';
 
@@ -93,6 +93,11 @@ export const googlePayloadSource = {
     let offset = 0;
     let canaryChecked = false;
 
+    // Wired, not decorative. This was hardened across three review rounds and then
+    // had no callers, so only hard block detection was live. Sustained slowdown is
+    // the earliest warning we get that we are pushing too hard, well before a 429.
+    const latency = createLatencyWatch();
+
     // Single exit shape. Every return goes through here, so a mistyped reason
     // throws at the point of return instead of reaching a caller that branches on
     // it and silently falls through to treating the run as successful.
@@ -172,7 +177,16 @@ export const googlePayloadSource = {
       }
 
       if (verdict.state === 'extraction_failed') {
-        return finish('canary_failed', [verdict.reason]);
+        return finish('canary_failed', [
+          `${verdict.reason} (${extracted.skipped} of ${extracted.rawCount} records were unusable)`,
+        ]);
+      }
+
+      if (Number.isFinite(page.latencyMs) && latency.observe(page.latencyMs)) {
+        return finish('blocked', [
+          `responses slowed sustainedly (last ${Math.round(page.latencyMs)}ms), which is the `
+          + 'earliest sign of rate limiting. Stopping rather than pushing through.',
+        ]);
       }
 
       leads.push(...pageLeads);

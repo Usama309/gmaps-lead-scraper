@@ -160,7 +160,7 @@ function bind() {
     state.minReviews = numberOr(e.target.value, 0); refresh();
   });
   $('#f-maxrev').addEventListener('input', (e) => {
-    state.maxReviews = numberOr(e.target.value, Infinity); refresh();
+    state.maxReviews = numberOr(e.target.value, null); refresh();
   });
   $('#f-lastrev').addEventListener('change', (e) => { state.lastReviewWithinDays = Number(e.target.value); refresh(); });
   $('#f-rating').addEventListener('change', (e) => { state.minRating = Number(e.target.value); refresh(); });

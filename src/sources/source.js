@@ -11,7 +11,7 @@
  */
 export const STOP_REASONS = Object.freeze([
   'end_of_list', 'cap_reached', 'blocked', 'canary_failed', 'aborted', 'network_error',
-  'completed', 'leg_threw',
+  'completed', 'completed_with_errors', 'leg_threw',
 ]);
 
 /**

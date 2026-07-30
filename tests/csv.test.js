@@ -52,7 +52,7 @@ function cellOf(csv, header) {
 
 function row(overrides = {}) {
   return {
-    name: 'Al-Shifa Dental Clinic', categories: ['Dentist'], score: 82,
+    name: 'Al-Shifa Dental Clinic', categories: ['Dentist'], score: 82, provisional: true,
     reasons: ['No website', 'dentist, no online booking'],
     rating: 4.3, reviewCount: 87, phone: '+92 57 261 2201',
     website: null, domain: null, websiteTech: 'none',
@@ -137,6 +137,31 @@ test('renders unknown enrichment as unknown, distinct from no', () => {
   assert.ok(cells.includes('unknown'));
 });
 
+test('emits the provisional flag as its own column, since every Phase 1 score is a floor', () => {
+  assert.equal(cellOf(toCsv([row({ provisional: true })]), 'Score provisional'), 'yes');
+  assert.equal(cellOf(toCsv([row({ provisional: false })]), 'Score provisional'), 'no');
+});
+
+test('email and socials render as unknown when never inspected, not as a blank cell', () => {
+  // Both rejoined the enrichment set: their null means "we did not look", the same
+  // as any other unenriched field, and rendering them blank made that read as a
+  // confirmed absence instead.
+  const csv = toCsv([row({ email: null })]);
+  assert.equal(cellOf(csv, 'Email'), 'unknown');
+});
+
+test('an empty socials list renders blank, since an empty array is a confirmed absence', () => {
+  const csv = toCsv([row({ socials: [] })]);
+  assert.equal(cellOf(csv, 'Social links'), '');
+});
+
+test('email and socials are validated like every other enrichment field', () => {
+  assert.throws(() => toCsv([row({ email: 123 })]), /which is not/,
+    'a non-string email should have been rejected');
+  assert.throws(() => toCsv([row({ socials: 'facebook' })]), /which is not/,
+    'a non-array socials value should have been rejected');
+});
+
 test('an empty lead list still emits the header', () => {
   assert.equal(toCsv([]), EXPORT_COLUMNS.map((c) => c.header).join(',') + NL);
 });
@@ -173,7 +198,7 @@ test('IMPORTANT: an enrichment field holding an unexpected value throws rather t
     ['hasBooking', 'yes'], ['hasChatbot', 'unknown'], ['ownerReplies', 'no'],
     ['hasBooking', 1], ['mobileFriendly', 'mostly'],
   ]) {
-    assert.throws(() => toCsv([row({ [key]: bad })]), /not one of/,
+    assert.throws(() => toCsv([row({ [key]: bad })]), /which is not/,
       `${key} = ${JSON.stringify(bad)} should have been rejected`);
   }
 });

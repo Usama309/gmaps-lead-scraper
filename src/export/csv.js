@@ -7,6 +7,10 @@ import { CONFIG } from '../core/config.js';
  */
 export const EXPORT_COLUMNS = Object.freeze([
   { key: 'score', header: 'Score' },
+  // Every Phase 1 score is provisional, because website enrichment does not exist
+  // yet and the mobile and booking components cannot be answered. The dashboard
+  // says so on screen; the CSV is the artifact that outlives the screen.
+  { key: 'provisional', header: 'Score provisional' },
   { key: 'name', header: 'Business' },
   { key: 'categories', header: 'Category' },
   { key: 'reasons', header: 'Why it scored' },
@@ -46,12 +50,13 @@ function renderCell(value) {
 
 function renderEnrichmentCell(key, value) {
   if (value === null || value === undefined) return 'unknown';
+  // An empty array is "we looked and found none", which renders like any empty list.
+  if (Array.isArray(value) && value.length === 0) return '';
 
-  const allowed = ENRICHMENT_VALUES.get(key);
-  if (!allowed.has(value)) {
+  const rule = ENRICHMENT_VALUES.get(key);
+  if (!rule.allows(value)) {
     throw new Error(
-      `${key} held ${JSON.stringify(value)}, which is not one of `
-      + `${[...allowed].map((v) => JSON.stringify(v)).join(', ')} or null. `
+      `${key} held ${JSON.stringify(value)}, which is not ${rule.describe} or null. `
       + 'Rendering it would make an unverified field indistinguishable from a verified one, '
       + 'and a subtly wrong export is worse than a failed one because nobody notices it.'
     );
@@ -71,10 +76,16 @@ function renderEnrichmentCell(key, value) {
  * mobileFriendly is genuinely tri-valued, since a site can be partly responsive.
  */
 const ENRICHMENT_VALUES = new Map([
-  ['mobileFriendly', new Set([true, false, 'partial'])],
-  ['hasBooking', new Set([true, false])],
-  ['hasChatbot', new Set([true, false])],
-  ['ownerReplies', new Set([true, false])],
+  ['mobileFriendly', { allows: (v) => v === true || v === false || v === 'partial',
+    describe: 'true, false or "partial"' }],
+  ['hasBooking', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  ['hasChatbot', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  ['ownerReplies', { allows: (v) => v === true || v === false, describe: 'true or false' }],
+  // email and socials belong here too. They are enrichment, so their null means
+  // never inspected and must read as "unknown" rather than blank, which is what an
+  // absent value looks like for an ordinary column.
+  ['email', { allows: (v) => typeof v === 'string' && v.length > 0, describe: 'an email address' }],
+  ['socials', { allows: (v) => Array.isArray(v), describe: 'an array of links' }],
 ]);
 
 /**

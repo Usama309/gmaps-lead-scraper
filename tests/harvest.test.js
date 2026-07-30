@@ -234,9 +234,38 @@ test('problems from every leg are carried out, not only halting ones', async () 
     source: { id: 'fake', async harvestLeg() { return { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] }; } },
     delay: async () => {},
   });
-  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.stopReason, 'completed_with_errors',
+    'a run whose legs all failed must not report plain success');
   assert.ok(result.problems.length >= 2, `a degraded run must not look clean: ${JSON.stringify(result.problems)}`);
   assert.ok(result.problems.every((p) => /ECONNRESET/.test(p)));
+});
+
+test('CRITICAL: completedLegs does not advance past a leg that failed without halting', async () => {
+  // completedLegs used to advance to i + 1 unconditionally for any non-halting
+  // stopReason, including network_error. A leg that failed without halting the
+  // run was then recorded as done, and resuming skipped straight past it, leaving
+  // that slice of the market silently missing from every later run.
+  const { legs } = planLegs({ keywords: ['a', 'b', 'c'], ...CENTRE, radiusKm: 2 });
+  assert.ok(legs.length >= 3, 'this test needs at least three legs');
+
+  let seen = 0;
+  const result = await runHarvest({
+    legs, pb: '!7i20!8i0',
+    source: {
+      id: 'fake',
+      async harvestLeg() {
+        seen += 1;
+        // Leg 0 fails without halting the run; legs 1 and 2 complete normally.
+        return seen === 1
+          ? { leads: [], stopReason: 'network_error', problems: ['ECONNRESET'] }
+          : { leads: [], stopReason: 'end_of_list', problems: [] };
+      },
+    },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'completed_with_errors');
+  assert.equal(result.completedLegs, 0,
+    'the failed first leg must not be recorded as completed, so resume retries it rather than skipping it');
 });
 
 test('onLeads receives only newly seen leads, never duplicates', async () => {

@@ -43,6 +43,37 @@ test('minScore filters', () => {
   assert.equal(out.length, 1);
 });
 
+test('BLOCKER: the default filter survives the message boundary', () => {
+  // DEFAULT_FILTER_STATE crosses chrome.runtime.sendMessage, which serialises as
+  // JSON. Infinity has no JSON form and arrived as null, after which
+  // `reviewCount > null` compares against zero, so the default filter kept ONLY
+  // businesses with no reviews at all. Every in-process test passed, because
+  // Infinity works fine until it is serialised.
+  const leads = [lead({ reviewCount: 120 }), lead({ reviewCount: 4 }), lead({ reviewCount: 0 })];
+
+  const inProcess = filterLeads(leads, DEFAULT_FILTER_STATE);
+  const overTheWire = filterLeads(leads, JSON.parse(JSON.stringify(DEFAULT_FILTER_STATE)));
+
+  assert.equal(inProcess.length, 3, 'the default filter caps nothing');
+  assert.equal(overTheWire.length, 3,
+    `serialising the default state dropped ${inProcess.length - overTheWire.length} leads`);
+});
+
+test('every default filter value survives JSON, since the UI sends this over a port', () => {
+  // Guards the whole object rather than the one field that bit us. Any future
+  // non-serialisable default fails here instead of silently in production.
+  const round = JSON.parse(JSON.stringify(DEFAULT_FILTER_STATE));
+  for (const [key, value] of Object.entries(DEFAULT_FILTER_STATE)) {
+    if (key === 'exportedKeys') continue; // a Set, replaced by the worker
+    assert.deepEqual(round[key], value, `${key} does not survive serialisation`);
+  }
+});
+
+test('an explicit max of zero means zero, not no limit', () => {
+  const leads = [lead({ reviewCount: 5 }), lead({ reviewCount: 0 })];
+  assert.equal(run(leads, { maxReviews: 0 }).length, 1);
+});
+
 test('minRating and maxReviews filter', () => {
   assert.equal(run([lead({ rating: 3.9 }), lead({ rating: 4.8 })], { minRating: 4.5 }).length, 1);
   assert.equal(run([lead({ reviewCount: 50 }), lead({ reviewCount: 900 })], { maxReviews: 500 }).length, 1);

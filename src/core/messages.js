@@ -15,6 +15,7 @@ export const MSG = Object.freeze({
   CONFIRM_EXPORT: 'mapprospector/confirm-export',
   RUN_PROGRESS: 'mapprospector/run-progress',
   RUN_BLOCKED: 'mapprospector/run-blocked',
+  RUN_COVERAGE: 'mapprospector/run-coverage',
 });
 
 const KNOWN = new Set(Object.values(MSG));

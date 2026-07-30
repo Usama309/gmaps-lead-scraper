@@ -21,7 +21,11 @@ export const DEFAULT_FILTER_STATE = Object.freeze({
 
   // Tier 2, Maps data.
   minReviews: 0,
-  maxReviews: Infinity,
+  // null means no cap, NOT Infinity. This object crosses chrome.runtime.sendMessage,
+  // which serialises as JSON, and Infinity has no JSON form: it arrives as null.
+  // `reviewCount > null` then evaluates as `> 0`, so the default filter silently
+  // kept only businesses with zero reviews. In-process tests never saw it.
+  maxReviews: null,
   hasPhone: 'any',
   website: 'any',
   ownerReplies: 'any',
@@ -88,7 +92,11 @@ export function filterLeads(leads, state) {
     if (l.rating !== null && l.rating < f.minRating) return false;
     if (l.reviewCount !== null) {
       if (l.reviewCount < f.minReviews) return false;
-      if (l.reviewCount > f.maxReviews) return false;
+      // Explicit null check. A bare comparison against null is a comparison
+      // against zero, which is the opposite of "no cap".
+      if (f.maxReviews !== null && f.maxReviews !== undefined && l.reviewCount > f.maxReviews) {
+        return false;
+      }
     }
 
     if (!triState(f.hasPhone, Boolean(l.phone))) return false;

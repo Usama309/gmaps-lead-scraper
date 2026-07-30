@@ -16,6 +16,26 @@ export const LEAD_FIELDS = [
   'email', 'socials', 'ownerReplies', 'lastReviewDays',
 ];
 
+/**
+ * Everything that follows from the website URL alone.
+ *
+ * Extracted so makeLead and mergeLead cannot disagree about it. They did: makeLead
+ * derived these while mergeLead copied them, which is how a derived false came to
+ * overwrite a known true.
+ */
+export function deriveWebsite(rawWebsite) {
+  const website = rawWebsite ? String(rawWebsite).trim() : null;
+  const domain = normalizeDomain(website);
+  const isSocial = domain !== null && SOCIAL_HOSTS.includes(domain);
+
+  return {
+    website,
+    domain,
+    hasRealWebsite: Boolean(website) && domain !== null && !isSocial,
+    websiteTech: !website || domain === null ? 'none' : (isSocial ? 'facebook' : null),
+  };
+}
+
 function numOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -33,13 +53,10 @@ function intOrNull(value) {
  * must never be scored as "it is absent".
  */
 export function makeLead(partial = {}) {
-  const website = partial.website ? String(partial.website).trim() : null;
-  const domain = normalizeDomain(website);
-  const isSocial = domain !== null && SOCIAL_HOSTS.includes(domain);
-
-  let websiteTech = partial.websiteTech ?? null;
-  if (!website || domain === null) websiteTech = 'none';
-  else if (isSocial) websiteTech = 'facebook';
+  const derived = deriveWebsite(partial.website);
+  const { website, domain } = derived;
+  // An explicit platform from enrichment wins, unless the URL itself settles it.
+  const websiteTech = derived.websiteTech ?? (partial.websiteTech ?? null);
 
   const lead = {
     cid: partial.cid ?? null,
@@ -58,7 +75,7 @@ export function makeLead(partial = {}) {
 
     website,
     domain,
-    hasRealWebsite: Boolean(website) && domain !== null && !isSocial,
+    hasRealWebsite: derived.hasRealWebsite,
     permanentlyClosed: partial.permanentlyClosed === true,
 
     enriched: partial.enriched === true,
@@ -76,11 +93,20 @@ export function makeLead(partial = {}) {
   return lead;
 }
 
-/** Fields that come from Maps and should take the freshest value available. */
+/**
+ * Fields that come from Maps and should take the freshest value available.
+ *
+ * `domain`, `hasRealWebsite` and `websiteTech` are deliberately absent. All three
+ * are DERIVED from `website`, so copying them straight across lets a derived
+ * `false` overwrite a known `true`: a re-harvest whose record happened to omit the
+ * URL flipped hasRealWebsite to false while the stored website survived, and the
+ * lead then matched a "no website" filter while displaying its own live URL. They
+ * are recomputed from the merged website instead, below.
+ */
 const MAPS_FIELDS = [
   'name', 'categories', 'address', 'lat', 'lng',
-  'rating', 'reviewCount', 'phone', 'website', 'domain',
-  'hasRealWebsite', 'permanentlyClosed', 'placeId',
+  'rating', 'reviewCount', 'phone', 'website',
+  'permanentlyClosed', 'placeId',
 ];
 
 /**
@@ -121,6 +147,20 @@ export function mergeLead(existing, incoming) {
 
   for (const field of MAPS_FIELDS) {
     if (!isEmpty(incoming[field])) merged[field] = incoming[field];
+  }
+
+  // Recompute everything derived from the website, from the MERGED website.
+  const websiteChanged = merged.website !== existing.website;
+  const derived = deriveWebsite(merged.website);
+  merged.domain = derived.domain;
+  merged.hasRealWebsite = derived.hasRealWebsite;
+
+  // Keep a platform we identified earlier only while it still describes the same
+  // real site. If the website changed or went away, the old platform is stale, and
+  // an unenriched lead would otherwise carry a live URL beside a "No website"
+  // verdict worth 40 score points.
+  if (websiteChanged || !derived.hasRealWebsite) {
+    merged.websiteTech = derived.websiteTech;
   }
 
   // Enrichment only flows in from a record that was actually enriched.

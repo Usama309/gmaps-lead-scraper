@@ -10,7 +10,7 @@ test('every message type is a unique namespaced string', () => {
 });
 
 test('the message set covers the phase 1 surface', () => {
-  for (const key of ['CAPTURE_PB', 'START_RUN', 'ABORT_RUN', 'GET_LEADS', 'EXPORT', 'RUN_PROGRESS']) {
+  for (const key of ['CAPTURE_PB', 'START_RUN', 'ABORT_RUN', 'GET_LEADS', 'EXPORT', 'RUN_PROGRESS', 'RUN_COVERAGE']) {
     assert.ok(key in MSG, `missing message type: ${key}`);
   }
 });

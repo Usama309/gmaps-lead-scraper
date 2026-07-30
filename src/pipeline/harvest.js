@@ -120,6 +120,11 @@ export async function runHarvest({
   const problems = [];
   let completedLegs = startAt;
 
+  // Index of the first leg that failed without halting the run. Resume restarts
+  // from there rather than past it, so a transient network fault costs a repeat
+  // rather than a hole in coverage. Dedupe makes the repeat free.
+  let firstFailedLeg = null;
+
   const finish = (stopReason) => ({
     leads: [...byKey.values()],
     stopReason: assertStopReason(stopReason),
@@ -187,11 +192,17 @@ export async function runHarvest({
       return finish(result.stopReason);
     }
 
-    completedLegs = i + 1;
+    if (result.stopReason !== 'end_of_list' && result.stopReason !== 'cap_reached') {
+      if (firstFailedLeg === null) firstFailedLeg = i;
+    }
+    completedLegs = firstFailedLeg ?? (i + 1);
 
     if (signal?.aborted) return finish('aborted');
     if (i + 1 < legs.length) await delay(nextDelayMs());
   }
 
-  return finish('completed');
+  // A run where legs failed is not a completed run, even though it reached the
+  // end of the queue. Reporting plain success while listing problems underneath
+  // invites the operator to read a degraded harvest as a full one.
+  return finish(problems.length > 0 ? 'completed_with_errors' : 'completed');
 }
