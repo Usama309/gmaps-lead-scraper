@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MapProspector Lead Dashboard</title>
+
+<style>
+  /* ============ TOKENS ============ */
+  :root {
+    --ground:        #EDF1F0;
+    --surface:       #F8FBFA;
+    --surface-2:     #E2EAE8;
+    --ink:           #0B1E22;
+    --ink-2:         #465A56;
+    --ink-3:         #71847F;
+    --rule:          #C7D5D2;
+    --rule-soft:     #DBE5E3;
+    --accent:        #0E6B63;
+    --accent-ink:    #FFFFFF;
+    --opportunity:   #9A5A08;
+    --opportunity-bg:#F6E7CE;
+    --sorted:        #5D736D;
+    --sorted-bg:     #E0E7E4;
+    --warn:          #9C3B18;
+    --shadow:        0 1px 2px rgba(11,30,34,.06), 0 8px 24px -16px rgba(11,30,34,.22);
+
+    --legend: "Helvetica Neue Condensed", "HelveticaNeue-CondensedBold",
+              "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+    --ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --data: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:        #07161A;
+      --surface:       #0C2025;
+      --surface-2:     #112B31;
+      --ink:           #E7F0EE;
+      --ink-2:         #9DB2AE;
+      --ink-3:         #6C837E;
+      --rule:          #1D383D;
+      --rule-soft:     #152C31;
+      --accent:        #3FB0A2;
+      --accent-ink:    #04191B;
+      --opportunity:   #E4A54D;
+      --opportunity-bg:#33260F;
+      --sorted:        #728882;
+      --sorted-bg:     #16292D;
+      --warn:          #DE7A54;
+      --shadow:        0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground:#EDF1F0; --surface:#F8FBFA; --surface-2:#E2EAE8;
+    --ink:#0B1E22; --ink-2:#465A56; --ink-3:#71847F;
+    --rule:#C7D5D2; --rule-soft:#DBE5E3;
+    --accent:#0E6B63; --accent-ink:#FFFFFF;
+    --opportunity:#9A5A08; --opportunity-bg:#F6E7CE;
+    --sorted:#5D736D; --sorted-bg:#E0E7E4; --warn:#9C3B18;
+    --shadow:0 1px 2px rgba(11,30,34,.06), 0 8px 24px -16px rgba(11,30,34,.22);
+  }
+  :root[data-theme="dark"] {
+    --ground:#07161A; --surface:#0C2025; --surface-2:#112B31;
+    --ink:#E7F0EE; --ink-2:#9DB2AE; --ink-3:#6C837E;
+    --rule:#1D383D; --rule-soft:#152C31;
+    --accent:#3FB0A2; --accent-ink:#04191B;
+    --opportunity:#E4A54D; --opportunity-bg:#33260F;
+    --sorted:#728882; --sorted-bg:#16292D; --warn:#DE7A54;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  .mp {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 14px;
+    line-height: 1.45;
+    min-height: 100%;
+    padding: 18px;
+  }
+
+  /* ============ MASTHEAD ============ */
+  .mp-head {
+    display: flex; flex-wrap: wrap; align-items: flex-end;
+    gap: 16px 24px; padding-bottom: 14px; margin-bottom: 18px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .mp-mark { display: flex; align-items: baseline; gap: 10px; }
+  .mp-mark h1 {
+    font-family: var(--legend);
+    font-size: 27px; font-weight: 700; letter-spacing: .09em;
+    text-transform: uppercase; margin: 0; text-wrap: balance;
+  }
+  .mp-mark .tick { color: var(--accent); font-size: 27px; line-height: 1; }
+  .mp-coord {
+    font-family: var(--data); font-size: 11px; color: var(--ink-3);
+    letter-spacing: .04em; font-variant-numeric: tabular-nums;
+  }
+  .mp-head-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  .mp-runstate {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--legend); text-transform: uppercase;
+    letter-spacing: .1em; font-size: 11px; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--rule);
+    padding: 7px 12px;
+  }
+  .mp-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent); flex: none;
+    animation: mp-pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes mp-pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+  /* ============ SHELL ============ */
+  .mp-shell { display: grid; grid-template-columns: 268px minmax(0,1fr); gap: 18px; }
+  @media (max-width: 940px) { .mp-shell { grid-template-columns: 1fr; } }
+
+  /* ============ FILTER RAIL ============ */
+  .mp-rail {
+    background: var(--surface); border: 1px solid var(--rule);
+    box-shadow: var(--shadow); align-self: start;
+    max-height: calc(100vh - 130px); overflow-y: auto;
+  }
+  @media (max-width: 940px) { .mp-rail { max-height: none; } }
+
+  .mp-group { border-bottom: 1px solid var(--rule-soft); padding: 13px 14px 15px; }
+  .mp-group:last-child { border-bottom: 0; }
+  .mp-group > header {
+    display: flex; align-items: baseline; gap: 7px; margin-bottom: 11px;
+  }
+  .mp-group h2 {
+    font-family: var(--legend); font-size: 11.5px; font-weight: 700;
+    letter-spacing: .13em; text-transform: uppercase; margin: 0; color: var(--ink);
+  }
+  .mp-cost {
+    font-family: var(--data); font-size: 9.5px; letter-spacing: .03em;
+    padding: 2px 5px; border: 1px solid var(--rule); color: var(--ink-3);
+    white-space: nowrap;
+  }
+  .mp-cost.rescrape { color: var(--warn); border-color: color-mix(in oklab, var(--warn) 40%, transparent); }
+  .mp-cost.instant  { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+
+  .mp-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 11px; }
+  .mp-field:last-child { margin-bottom: 0; }
+  .mp-field > label {
+    font-size: 11px; font-weight: 600; color: var(--ink-2);
+    letter-spacing: .02em;
+  }
+  .mp-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 11px; }
+  .mp-hint { font-size: 10.5px; color: var(--ink-3); margin: 1px 0 0; line-height: 1.35; }
+  #loc-coords:not([hidden]) { display: block; margin-bottom: 13px; }
+
+  input[type="text"], input[type="number"], select {
+    font-family: var(--ui); font-size: 12.5px; color: var(--ink);
+    background: var(--ground); border: 1px solid var(--rule);
+    padding: 6px 8px; width: 100%; border-radius: 0;
+  }
+  input[type="number"] { font-family: var(--data); font-variant-numeric: tabular-nums; }
+  select { appearance: none; padding-right: 22px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+                      linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+    background-position: calc(100% - 12px) 12px, calc(100% - 8px) 12px;
+    background-size: 4px 4px, 4px 4px; background-repeat: no-repeat;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible, .mp-chip:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+
+  /* keyword chips */
+  .mp-kw { display: flex; flex-wrap: wrap; gap: 5px; }
+  .mp-kw span {
+    font-family: var(--data); font-size: 11px; padding: 3px 6px;
+    background: var(--surface-2); border: 1px solid var(--rule); color: var(--ink-2);
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .mp-kw span b { color: var(--ink-3); font-weight: 400; cursor: pointer; }
+
+  /* segmented tri-state */
+  .mp-seg { display: flex; border: 1px solid var(--rule); }
+  .mp-seg button {
+    flex: 1; font-family: var(--legend); text-transform: uppercase;
+    letter-spacing: .07em; font-size: 10px; padding: 6px 2px;
+    background: var(--ground); color: var(--ink-3);
+    border: 0; border-right: 1px solid var(--rule); cursor: pointer;
+  }
+  .mp-seg button:last-child { border-right: 0; }
+  .mp-seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+  /* multi-select chips */
+  .mp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .mp-chip {
+    font-family: var(--data); font-size: 11px; padding: 3.5px 7px;
+    background: var(--ground); border: 1px solid var(--rule);
+    color: var(--ink-2); cursor: pointer;
+  }
+  .mp-chip[aria-pressed="true"] {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+  }
+
+  /* range */
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .mp-rangehead { display: flex; justify-content: space-between; align-items: baseline; }
+  .mp-rangeval {
+    font-family: var(--data); font-size: 13px; font-weight: 600;
+    color: var(--accent); font-variant-numeric: tabular-nums;
+  }
+
+  .mp-check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+  .mp-check input { margin-top: 2px; accent-color: var(--accent); flex: none; }
+  .mp-check span { font-size: 12px; color: var(--ink-2); }
+  .mp-check span em { display: block; font-style: normal; font-size: 10.5px; color: var(--ink-3); }
+
+  /* ============ READOUT ============ */
+  .mp-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .mp-readout {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(128px,1fr));
+    background: var(--surface); border: 1px solid var(--rule); box-shadow: var(--shadow);
+  }
+  .mp-stat { padding: 12px 14px; border-right: 1px solid var(--rule-soft); }
+  .mp-stat:last-child { border-right: 0; }
+  .mp-stat dt {
+    font-family: var(--legend); font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-3); margin: 0 0 4px;
+  }
+  .mp-stat dd {
+    margin: 0; font-family: var(--data); font-size: 21px; font-weight: 600;
+    font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+  }
+  .mp-stat dd small { font-size: 11px; font-weight: 400; color: var(--ink-3); }
+  .mp-stat.hot dd { color: var(--opportunity); }
+
+  /* progress hairline */
+  .mp-prog { grid-column: 1/-1; border-top: 1px solid var(--rule-soft); padding: 9px 14px; }
+  .mp-prog-label {
+    display: flex; justify-content: space-between; font-family: var(--data);
+    font-size: 10.5px; color: var(--ink-3); margin-bottom: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-bar { height: 3px; background: var(--surface-2); overflow: hidden; }
+  .mp-bar i { display: block; height: 100%; background: var(--accent); width: 68%; }
+
+  /* ============ TABLE ============ */
+  .mp-tablewrap {
+    background: var(--surface); border: 1px solid var(--rule);
+    box-shadow: var(--shadow); overflow-x: auto;
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 880px; }
+  thead th {
+    font-family: var(--legend); font-size: 10px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--ink-3); font-weight: 700;
+    text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--rule);
+    background: var(--surface); position: sticky; top: 0; white-space: nowrap;
+  }
+  thead th.sortable { cursor: pointer; user-select: none; }
+  thead th.sortable:hover { color: var(--ink); }
+  thead th .arw { color: var(--accent); }
+  thead th.num, td.num { text-align: right; }
+
+  tbody tr { border-bottom: 1px solid var(--rule-soft); }
+  tbody tr:last-child { border-bottom: 0; }
+  tbody tr.dim { opacity: .58; }
+  tbody tr:hover { background: var(--surface-2); }
+  td { padding: 9px 10px; vertical-align: top; }
+
+  .mp-scorecell { display: flex; align-items: center; gap: 8px; }
+  .mp-stripe { width: 3px; align-self: stretch; min-height: 26px; flex: none; }
+  .mp-scoreno {
+    font-family: var(--data); font-size: 15px; font-weight: 600;
+    font-variant-numeric: tabular-nums; width: 2.2em; text-align: right;
+  }
+  .mp-meter { width: 40px; height: 4px; background: var(--surface-2); flex: none; }
+  .mp-meter i { display: block; height: 100%; }
+
+  .mp-name { font-weight: 600; font-size: 13.5px; }
+  .mp-cat { font-size: 11px; color: var(--ink-3); }
+  .mp-why { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .mp-why b, .mp-why i {
+    font-family: var(--data); font-size: 10px; font-weight: 400; font-style: normal;
+    padding: 2px 5px; white-space: nowrap;
+  }
+  .mp-why b { background: var(--opportunity-bg); color: var(--opportunity); }
+  .mp-why i { background: var(--sorted-bg); color: var(--sorted); }
+
+  .mp-num { font-family: var(--data); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .mp-sub { font-size: 10.5px; color: var(--ink-3); font-family: var(--data); }
+  .mp-nowrap { white-space: nowrap; }
+  .mp-none { color: var(--opportunity); font-weight: 600; }
+  .mp-has  { color: var(--sorted); }
+
+  /* ============ EXPORT BAR ============ */
+  .mp-export {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+    background: var(--surface); border: 1px solid var(--rule);
+    box-shadow: var(--shadow); padding: 11px 14px;
+  }
+  .mp-export .count { font-family: var(--data); font-size: 12.5px; color: var(--ink-2); }
+  .mp-export .count b { color: var(--ink); font-size: 15px; }
+  .mp-export .sp { margin-left: auto; }
+  .mp-fmt { display: flex; border: 1px solid var(--rule); }
+  .mp-fmt button {
+    font-family: var(--legend); text-transform: uppercase; letter-spacing: .08em;
+    font-size: 10.5px; padding: 7px 11px; background: var(--ground);
+    color: var(--ink-3); border: 0; border-right: 1px solid var(--rule); cursor: pointer;
+  }
+  .mp-fmt button:last-child { border-right: 0; }
+  .mp-fmt button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .mp-go {
+    font-family: var(--legend); text-transform: uppercase; letter-spacing: .1em;
+    font-size: 12px; font-weight: 700; padding: 9px 20px; cursor: pointer;
+    background: var(--ink); color: var(--ground); border: 1px solid var(--ink);
+  }
+  .mp-go:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  .mp-toast {
+    font-family: var(--data); font-size: 11.5px; color: var(--accent);
+    opacity: 0; transition: opacity .25s;
+  }
+  .mp-toast.on { opacity: 1; }
+
+  .mp-foot {
+    font-size: 11.5px; color: var(--ink-3); padding-top: 4px;
+    display: flex; flex-wrap: wrap; gap: 6px 16px;
+  }
+  .mp-foot code {
+    font-family: var(--data); font-size: 10.5px;
+    background: var(--surface-2); padding: 1px 4px; color: var(--ink-2);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="mp">
+
+  <header class="mp-head">
+    <div class="mp-mark">
+      <span class="tick" aria-hidden="true">&#9678;</span>
+      <h1>MapProspector</h1>
+    </div>
+    <div class="mp-coord">
+      33.7609824,&nbsp;72.342874 &nbsp;&middot;&nbsp; z14.98 &nbsp;&middot;&nbsp; ATTOCK / HAZRO, PB
+    </div>
+    <div class="mp-head-right">
+      <div class="mp-runstate">
+        <span class="mp-dot" aria-hidden="true"></span>
+        <span>Harvest leg 2 of 3</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="mp-shell">
+
+    <!-- ================= FILTER RAIL ================= -->
+    <aside class="mp-rail" aria-label="Filters">
+
+      <section class="mp-group">
+        <header>
+          <h2>Search</h2>
+          <span class="mp-cost rescrape">re-runs harvest</span>
+        </header>
+
+        <div class="mp-field">
+          <label for="f-kw">Business keywords</label>
+          <input type="text" id="f-kw" value="dental clinic" aria-describedby="f-kw-list">
+          <div class="mp-kw" id="f-kw-list">
+            <span>dentist <b aria-hidden="true">&times;</b></span>
+            <span>orthodontist <b aria-hidden="true">&times;</b></span>
+            <span>beauty salon <b aria-hidden="true">&times;</b></span>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Locate by</label>
+          <div class="mp-seg" role="group" aria-label="Location input mode">
+            <button type="button" data-locmode="place" aria-pressed="true">Place name</button>
+            <button type="button" data-locmode="coords" aria-pressed="false">Lat / Lng</button>
+          </div>
+        </div>
+
+        <div class="mp-field" id="loc-place">
+          <label for="f-loc">Place, city or ZIP</label>
+          <input type="text" id="f-loc" value="Attock, Punjab, Pakistan">
+        </div>
+
+        <div id="loc-coords" hidden>
+          <div class="mp-row2">
+            <div class="mp-field">
+              <label for="f-lat">Latitude</label>
+              <input type="text" id="f-lat" value="33.7609824">
+            </div>
+            <div class="mp-field">
+              <label for="f-lng">Longitude</label>
+              <input type="text" id="f-lng" value="72.342874">
+            </div>
+          </div>
+          <div class="mp-field">
+            <label for="f-zoom">Map zoom</label>
+            <input type="text" id="f-zoom" value="14.98">
+          </div>
+          <p class="mp-hint">Paste any Google Maps URL into Place name and I will pull the
+             coordinates and zoom out of it automatically.</p>
+        </div>
+
+        <div class="mp-field">
+          <label for="f-radius">Radius</label>
+          <select id="f-radius">
+            <option>2 km</option><option>5 km</option><option selected>15 km</option>
+            <option>30 km</option><option>50 km</option><option>100 km</option>
+          </select>
+        </div>
+
+        <div class="mp-field">
+          <label for="f-cat">Business category</label>
+          <input type="text" id="f-cat" list="cat-list" autocomplete="off"
+                 placeholder="Search all categories, Enter to add">
+          <datalist id="cat-list"></datalist>
+          <div class="mp-kw" id="cat-chips"></div>
+          <p class="mp-hint"><span id="cat-count">0</span> selected. Leave empty for every category.</p>
+        </div>
+
+        <div class="mp-row2">
+          <div class="mp-field">
+            <label for="f-rating">Min rating</label>
+            <select id="f-rating">
+              <option value="0" selected>Any</option>
+              <option value="3.5">3.5 +</option><option value="4">4.0 +</option>
+              <option value="4.5">4.5 +</option>
+            </select>
+          </div>
+          <div class="mp-field">
+            <label>Open now</label>
+            <div class="mp-seg" role="group" aria-label="Open now">
+              <button type="button" aria-pressed="true">Any</button>
+              <button type="button" aria-pressed="false">Open</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mp-group">
+        <header>
+          <h2>Maps data</h2>
+          <span class="mp-cost instant">instant</span>
+        </header>
+
+        <div class="mp-row2">
+          <div class="mp-field">
+            <label for="f-minrev">Min reviews</label>
+            <input type="number" id="f-minrev" value="10" min="0">
+          </div>
+          <div class="mp-field">
+            <label for="f-maxrev">Max reviews</label>
+            <input type="number" id="f-maxrev" value="500" min="0">
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Website</label>
+          <div class="mp-seg" role="group" aria-label="Website">
+            <button type="button" data-web="any" aria-pressed="true">Any</button>
+            <button type="button" data-web="no" aria-pressed="false">None</button>
+            <button type="button" data-web="yes" aria-pressed="false">Has</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Phone listed</label>
+          <div class="mp-seg" role="group" aria-label="Phone listed">
+            <button type="button" data-phone="any" aria-pressed="true">Any</button>
+            <button type="button" data-phone="yes" aria-pressed="false">Has</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Owner replies to reviews</label>
+          <div class="mp-seg" role="group" aria-label="Owner replies">
+            <button type="button" aria-pressed="true">Any</button>
+            <button type="button" aria-pressed="false">Yes</button>
+            <button type="button" aria-pressed="false">No</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label for="f-lastrev">Last review within</label>
+          <select id="f-lastrev">
+            <option value="0" selected>Any time</option>
+            <option value="3">Last 3 days</option>
+            <option value="7">Last 1 week</option>
+            <option value="14">Last 2 weeks</option>
+            <option value="30">Last 1 month</option>
+            <option value="90">Last 3 months</option>
+            <option value="180">Last 6 months</option>
+            <option value="365">Last 12 months</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="mp-group">
+        <header>
+          <h2>Website intel</h2>
+          <span class="mp-cost instant">instant</span>
+        </header>
+
+        <div class="mp-field">
+          <label>Technology</label>
+          <div class="mp-chips" role="group" aria-label="Website technology">
+            <button type="button" class="mp-chip" data-tech="WordPress" aria-pressed="false">WordPress</button>
+            <button type="button" class="mp-chip" data-tech="Wix" aria-pressed="false">Wix</button>
+            <button type="button" class="mp-chip" data-tech="Squarespace" aria-pressed="false">Squarespace</button>
+            <button type="button" class="mp-chip" data-tech="GoDaddy" aria-pressed="false">GoDaddy</button>
+            <button type="button" class="mp-chip" data-tech="Shopify" aria-pressed="false">Shopify</button>
+            <button type="button" class="mp-chip" data-tech="Custom" aria-pressed="false">Custom</button>
+            <button type="button" class="mp-chip" data-tech="None" aria-pressed="false">No site</button>
+            <button type="button" class="mp-chip" data-tech="Dead" aria-pressed="false">Dead link</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Mobile friendly</label>
+          <div class="mp-seg" role="group" aria-label="Mobile friendly">
+            <button type="button" data-mob="any" aria-pressed="true">Any</button>
+            <button type="button" data-mob="no" aria-pressed="false">Fails</button>
+            <button type="button" data-mob="yes" aria-pressed="false">Passes</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Online booking</label>
+          <div class="mp-seg" role="group" aria-label="Online booking">
+            <button type="button" data-book="any" aria-pressed="true">Any</button>
+            <button type="button" data-book="no" aria-pressed="false">Missing</button>
+            <button type="button" data-book="yes" aria-pressed="false">Has</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>AI chatbot</label>
+          <div class="mp-seg" role="group" aria-label="AI chatbot">
+            <button type="button" aria-pressed="true">Any</button>
+            <button type="button" aria-pressed="false">Missing</button>
+            <button type="button" aria-pressed="false">Present</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Email found</label>
+          <div class="mp-seg" role="group" aria-label="Email found">
+            <button type="button" data-mail="any" aria-pressed="true">Any</button>
+            <button type="button" data-mail="yes" aria-pressed="false">Has</button>
+          </div>
+        </div>
+
+        <div class="mp-field">
+          <label>Social links</label>
+          <div class="mp-chips" role="group" aria-label="Social links">
+            <button type="button" class="mp-chip" aria-pressed="false">Facebook</button>
+            <button type="button" class="mp-chip" aria-pressed="false">Instagram</button>
+            <button type="button" class="mp-chip" aria-pressed="false">Any</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="mp-group">
+        <header>
+          <h2>Score &amp; output</h2>
+          <span class="mp-cost instant">instant</span>
+        </header>
+
+        <div class="mp-field">
+          <div class="mp-rangehead">
+            <label for="f-score">Min lead score</label>
+            <span class="mp-rangeval" id="f-scoreval">55</span>
+          </div>
+          <input type="range" id="f-score" min="0" max="100" value="55" step="5">
+        </div>
+
+        <label class="mp-check">
+          <input type="checkbox" id="f-dupe" checked>
+          <span>Skip duplicates
+            <em>Hide the 1,284 businesses already exported in past runs</em>
+          </span>
+        </label>
+      </section>
+    </aside>
+
+    <!-- ================= MAIN ================= -->
+    <div class="mp-main">
+
+      <dl class="mp-readout">
+        <div class="mp-stat">
+          <dt>Harvested</dt>
+          <dd id="s-harv">18</dd>
+        </div>
+        <div class="mp-stat">
+          <dt>Passing filters</dt>
+          <dd id="s-pass">0</dd>
+        </div>
+        <div class="mp-stat hot">
+          <dt>Score 80+</dt>
+          <dd id="s-hot">0</dd>
+        </div>
+        <div class="mp-stat">
+          <dt>Median score</dt>
+          <dd id="s-med">0</dd>
+        </div>
+        <div class="mp-stat">
+          <dt>No website</dt>
+          <dd id="s-nosite">0<small> of pass</small></dd>
+        </div>
+        <div class="mp-stat">
+          <dt>Duplicates hidden</dt>
+          <dd id="s-dupe">6</dd>
+        </div>
+
+        <div class="mp-prog">
+          <div class="mp-prog-label">
+            <span>Website enrichment &nbsp;&middot;&nbsp; 12 of 18 domains resolved &nbsp;&middot;&nbsp; 3 cached &nbsp;&middot;&nbsp; 1 blocked by Cloudflare</span>
+            <span>68%</span>
+          </div>
+          <div class="mp-bar" role="progressbar" aria-valuenow="68" aria-valuemin="0" aria-valuemax="100"><i></i></div>
+        </div>
+      </dl>
+
+      <div class="mp-tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="score">Score <span class="arw">&#9660;</span></th>
+              <th>Business &amp; why it scored</th>
+              <th class="num sortable" data-sort="rating">Rating</th>
+              <th class="num sortable" data-sort="reviews">Reviews</th>
+              <th>Phone</th>
+              <th>Website</th>
+              <th>Tech</th>
+              <th>Mobile</th>
+              <th>Booking</th>
+              <th>Email</th>
+              <th class="sortable" data-sort="last">Last review</th>
+            </tr>
+          </thead>
+          <tbody id="mp-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="mp-export">
+        <span class="count"><b id="e-count">0</b> leads ready to export</span>
+        <div class="mp-fmt sp" role="group" aria-label="Export format">
+          <button type="button" data-fmt="CSV" aria-pressed="true">CSV</button>
+          <button type="button" data-fmt="Excel" aria-pressed="false">Excel</button>
+          <button type="button" data-fmt="Sheets" aria-pressed="false">Sheets</button>
+          <button type="button" data-fmt="JSON" aria-pressed="false">JSON</button>
+        </div>
+        <button type="button" class="mp-go" id="e-go">Export</button>
+        <span class="mp-toast" id="e-toast"></span>
+      </div>
+
+      <div class="mp-foot">
+        <span>Mockup with sample Attock-area data. Nothing is scraped or exported here.</span>
+        <span><code>amber</code> = gap you can sell into</span>
+        <span><code>grey</code> = already sorted, deprioritised</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  // The sample-data render path (LEADS, LASTDAYS, passes(), stripeColor(), render())
+  // is gone. dashboard.js owns real data, real filtering and real rendering now;
+  // everything left in this block is cosmetic rail interaction that dashboard.js
+  // does not otherwise drive (category typeahead, location-mode toggle, export
+  // format toggle, sort-arrow display).
+  var state = { web:"any", phone:"any", mob:"any", book:"any", mail:"any",
+                tech:[], score:55, minrev:10, maxrev:500, lastrev:0,
+                sort:"score", dir:-1, fmt:"CSV" };
+
+  // Representative slice of the Google Business Profile taxonomy. The real build
+  // bundles the full published list and matches on it.
+  var CATEGORIES = ("Accountant,Advertising agency,Air conditioning repair service,Architect,"+
+    "Auto body shop,Auto repair shop,Bakery,Bank,Bar,Barber shop,Beauty salon,Bicycle shop,"+
+    "Bookstore,Butcher shop,Cafe,Car dealer,Car wash,Carpenter,Caterer,Chiropractor,"+
+    "Cleaning service,Clothing store,Coffee shop,Computer repair service,Construction company,"+
+    "Consultant,Dance school,Day care center,Dentist,Dermatologist,Driving school,Dry cleaner,"+
+    "Electrician,Employment agency,Event planner,Eye care center,Financial consultant,"+
+    "Fitness centre,Florist,Funeral home,Furniture store,Garden centre,General contractor,"+
+    "Grocery store,Gym,Hair salon,Hardware store,Home builder,Hotel,Insurance agency,"+
+    "Interior designer,Internet marketing service,Jeweler,Laundry service,Law firm,Lawyer,"+
+    "Locksmith,Marketing agency,Massage therapist,Medical clinic,Mobile phone repair shop,"+
+    "Mortgage broker,Moving company,Nail salon,Notary public,Nutritionist,Optician,"+
+    "Orthodontist,Painter,Pest control service,Pet groomer,Pharmacy,Photographer,"+
+    "Physiotherapist,Plumber,Print shop,Real estate agency,Restaurant,Roofing contractor,"+
+    "School,Security service,Solar energy company,Spa,Sporting goods store,Storage facility,"+
+    "Supermarket,Tailor,Tattoo shop,Tax preparation service,Taxi service,Therapist,Tyre shop,"+
+    "Towing service,Travel agency,Tutoring service,Used car dealer,Veterinarian,Web designer,"+
+    "Wedding planner,Yoga studio").split(",");
+
+  var $ = function (s) { return document.querySelector(s); };
+
+  function esc(t) {
+    return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  // Segmented groups toggle visually here. dashboard.js binds its own listener to
+  // the same buttons and drives the real filter state and re-render from that.
+  document.querySelectorAll(".mp-seg").forEach(function (grp) {
+    grp.querySelectorAll("button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        grp.querySelectorAll("button").forEach(function (b) {
+          b.setAttribute("aria-pressed", "false");
+        });
+        btn.setAttribute("aria-pressed", "true");
+        Object.keys(btn.dataset).forEach(function (k) { state[k] = btn.dataset[k]; });
+      });
+    });
+  });
+
+  // Technology chips are owned by dashboard.js, which binds its own toggle to
+  // .mp-chip[data-tech]. Binding the same read-then-flip toggle here too would
+  // race the two handlers and cancel the visible state out on every click, so
+  // this legacy handler is scoped to the chips dashboard.js does not touch
+  // (social links), which stay decorative until Phase 2 wires that filter.
+  document.querySelectorAll(".mp-chip:not([data-tech])").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var on = btn.getAttribute("aria-pressed") === "true";
+      btn.setAttribute("aria-pressed", on ? "false" : "true");
+    });
+  });
+
+  $("#f-score").addEventListener("input", function (e) {
+    state.score = +e.target.value;
+    $("#f-scoreval").textContent = state.score;
+  });
+  $("#f-lastrev").addEventListener("change", function (e) {
+    state.lastrev = +e.target.value;
+  });
+
+  // Locate by place name vs raw coordinates
+  document.querySelectorAll("[data-locmode]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var coords = btn.dataset.locmode === "coords";
+      $("#loc-coords").hidden = !coords;
+      $("#loc-place").hidden = coords;
+    });
+  });
+
+  // Category typeahead with chips
+  var catList = $("#cat-list"), catChips = $("#cat-chips"), catInput = $("#f-cat");
+  var chosen = [];
+  CATEGORIES.forEach(function (c) {
+    var o = document.createElement("option"); o.value = c; catList.appendChild(o);
+  });
+  function drawCats() {
+    catChips.innerHTML = chosen.map(function (c, i) {
+      return '<span>' + esc(c) + ' <b data-i="' + i + '" role="button" tabindex="0" ' +
+             'aria-label="Remove ' + esc(c) + '">&times;</b></span>';
+    }).join("");
+    $("#cat-count").textContent = chosen.length;
+    catChips.querySelectorAll("b").forEach(function (x) {
+      x.addEventListener("click", function () { chosen.splice(+x.dataset.i, 1); drawCats(); });
+    });
+  }
+  function addCat(v) {
+    v = (v || "").trim();
+    if (v && chosen.indexOf(v) === -1) { chosen.push(v); drawCats(); }
+    catInput.value = "";
+  }
+  catInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); addCat(catInput.value); }
+  });
+  catInput.addEventListener("change", function () {
+    if (CATEGORIES.indexOf(catInput.value) !== -1) addCat(catInput.value);
+  });
+  drawCats();
+
+  $("#f-minrev").addEventListener("input", function (e) { state.minrev = +e.target.value || 0; });
+  $("#f-maxrev").addEventListener("input", function (e) { state.maxrev = +e.target.value || 1e9; });
+
+  // Sort-arrow display only. Column-header sorting is not wired to the real
+  // dataset in this phase; DEFAULT_FILTER_STATE still drives sort via sortBy.
+  document.querySelectorAll("th.sortable").forEach(function (th) {
+    th.addEventListener("click", function () {
+      var k = th.dataset.sort;
+      state.dir = (state.sort === k) ? -state.dir : -1;
+      state.sort = k;
+      document.querySelectorAll("th.sortable .arw").forEach(function (a) { a.remove(); });
+      var arw = document.createElement("span");
+      arw.className = "arw";
+      arw.innerHTML = state.dir === -1 ? "&nbsp;&#9660;" : "&nbsp;&#9650;";
+      th.appendChild(arw);
+    });
+  });
+
+  document.querySelectorAll("[data-fmt]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("[data-fmt]").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      state.fmt = btn.dataset.fmt;
+    });
+  });
+
+  // The real export button is bound in dashboard.js, which calls MSG.EXPORT and
+  // markExported. Nothing here duplicates that.
+})();
+</script>
+
+<script type="module" src="dashboard.js"></script>
+</body>
+</html>

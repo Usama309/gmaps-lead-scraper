@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MapProspector</title>
+<style>
+  body { font: 13px/1.45 system-ui, sans-serif; margin: 0; padding: 14px;
+         background: #EDF1F0; color: #0B1E22; }
+  h1 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; margin: 0 0 12px; }
+  label { display: block; font-size: 11px; font-weight: 600; margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 6px 8px; border: 1px solid #C7D5D2;
+                  background: #F8FBFA; font: inherit; }
+  button { font: inherit; font-weight: 700; padding: 9px 16px; margin-top: 14px;
+           border: 1px solid #0B1E22; background: #0B1E22; color: #EDF1F0; cursor: pointer; }
+  button.secondary { background: transparent; color: #0B1E22; margin-left: 6px; }
+  #log { margin-top: 14px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+         white-space: pre-wrap; color: #465A56; max-height: 300px; overflow-y: auto; }
+  .warn { color: #9C3B18; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #07161A; color: #E7F0EE; }
+    input, select { background: #0C2025; border-color: #1D383D; color: #E7F0EE; }
+    button { background: #E7F0EE; color: #07161A; border-color: #E7F0EE; }
+    button.secondary { background: transparent; color: #E7F0EE; }
+    #log { color: #9DB2AE; }
+  }
+</style>
+</head>
+<body>
+  <h1>MapProspector</h1>
+  <label for="kw">Keywords, comma separated</label>
+  <input id="kw" value="dentist, dental clinic">
+  <label for="lat">Latitude</label>
+  <input id="lat" value="33.7609824">
+  <label for="lng">Longitude</label>
+  <input id="lng" value="72.342874">
+  <label for="radius">Radius km</label>
+  <select id="radius">
+    <option>2</option><option selected>15</option><option>30</option><option>50</option>
+  </select>
+  <button id="run">Start harvest</button>
+  <button id="stop" class="secondary">Stop</button>
+  <button id="open" class="secondary">Open dashboard</button>
+  <div id="log"></div>
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

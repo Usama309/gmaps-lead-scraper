@@ -150,3 +150,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 
   return true; // keep the channel open for the async response
 });
+
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((error) => console.error('side panel behaviour not set', error));

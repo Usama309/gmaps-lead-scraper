@@ -34,3 +34,24 @@ type safety here. A build step is friction with no proportional payoff at this s
 **Why:** Without it the ID changes on every unpacked reload and the Phase 4 Sheets OAuth
 client breaks silently. That is the usual failure mode for this feature.
 **Extension ID:** ghnhjhnldonkhjojmclnimghpcgocmce
+
+## ADR-005: The dashboard mockup's dead sample-data code was removed, not just its two named lines
+**Date:** 2026-07-30
+**Decision:** Task 14's brief named exactly two edits to the mockup's inline script: delete the
+`LEADS` array and delete the final `render();` bootstrap call. Implementing only those two,
+literally, leaves `render()`, `passes()`, `stripeColor()` and `LASTDAYS` in place referencing
+the now-undefined `LEADS`, still wired to the score slider, review-count fields, tech chips,
+segmented buttons and sort headers. Those would throw a ReferenceError on every such click.
+Worse, the mockup's own `.mp-chip` toggle and `#e-go` export handler stay bound alongside
+`dashboard.js`'s real handlers on the same elements: the chip toggle is read-then-flip, so the
+two handlers cancel each other's `aria-pressed` state and the Technology filter never actually
+engages, and the export handler overwrites the real toast with fake "(mockup)" text.
+**Why:** The task's own stated priorities are "never mislead the operator" (provisional score,
+coverage-cut warnings) and the user's standing rule to remove dead code rather than ship it
+broken. A literal two-line edit ships a filter control that visibly does not work and an export
+confirmation that can show false text, which contradicts both.
+**Consequence:** Removed the entire sample-data render path and every `render()` call site, and
+scoped the mockup's chip handler to skip `[data-tech]` chips (owned by `dashboard.js`) and
+removed its `#e-go` handler entirely. Zero HTML or CSS changed; every ID, class and visible
+layout is exactly the approved mockup. Category typeahead, location-mode toggle, export-format
+toggle and sort-arrow display, none of which conflict with `dashboard.js`, were left untouched.

@@ -37,5 +37,11 @@
     "https://www.google.com/*",
     "http://*/*",
     "https://*/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/ui/dashboard/index.html"],
+      "matches": ["https://www.google.com/*"]
+    }
   ]
 }
