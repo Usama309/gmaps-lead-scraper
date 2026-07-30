@@ -9,6 +9,34 @@ import { putLeads, getAllLeads, getExportedKeys, markExported, saveRun } from '.
 let activeRun = null;
 let latestPb = null;
 
+/**
+ * An MV3 service worker is terminated after roughly 30 seconds of inactivity, and
+ * module state dies with it. Losing the captured pb that way makes an already
+ * successful search report "no search parameters captured yet", so it is mirrored
+ * into session storage, which survives worker restarts within the browser session.
+ */
+const PB_STORAGE_KEY = 'latestPb';
+
+async function rememberPb(pb) {
+  latestPb = pb;
+  try {
+    await chrome.storage.session.set({ [PB_STORAGE_KEY]: pb });
+  } catch (error) {
+    console.error('could not persist the captured search parameters', error);
+  }
+}
+
+async function recallPb() {
+  if (latestPb) return latestPb;
+  try {
+    const stored = await chrome.storage.session.get(PB_STORAGE_KEY);
+    latestPb = stored?.[PB_STORAGE_KEY] ?? null;
+  } catch {
+    latestPb = null;
+  }
+  return latestPb;
+}
+
 function broadcast(type, payload) {
   chrome.runtime.sendMessage({ type, payload }).catch(() => {
     // No listener open. Progress messages are advisory, so dropping one is fine.
@@ -17,7 +45,9 @@ function broadcast(type, payload) {
 
 async function startRun(config) {
   if (activeRun) throw new Error('a run is already in progress');
-  if (!latestPb) {
+
+  const pb = await recallPb();
+  if (!pb) {
     throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
   }
 
@@ -25,22 +55,42 @@ async function startRun(config) {
   const controller = new AbortController();
   const runId = `run-${Date.now()}`;
 
+  // Serialises every store write for this run, so they land in order and can be
+  // drained before the run reports done.
+  let pendingWrites = Promise.resolve();
+
   activeRun = { runId, controller, legs };
   await saveRun({ id: runId, config, legs, completedLegs: 0, startedAt: new Date().toISOString() });
 
   try {
     const result = await runHarvest({
       legs,
-      pb: latestPb,
+      pb,
       source: googlePayloadSource,
       signal: controller.signal,
-      onLeads: (leads) => { putLeads(leads).catch((e) => console.error('putLeads failed', e)); },
+      // Writes are chained rather than fired and forgotten. Overlapping calls
+      // against a merge-on-write store can interleave, and an un-awaited write is
+      // simply lost if the worker is evicted mid-flight, with the failure landing
+      // in a console nobody is watching.
+      onLeads: (leads) => {
+        pendingWrites = pendingWrites
+          .then(() => putLeads(leads))
+          .then((result) => {
+            if (result.failed?.length) {
+              console.error(`${result.failed.length} leads could not be stored`, result.failed);
+            }
+          })
+          .catch((error) => console.error('storing leads failed', error));
+      },
       onProgress: (p) => {
         broadcast(MSG.RUN_PROGRESS, p);
-        saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }).catch(() => {});
+        pendingWrites = pendingWrites
+          .then(() => saveRun({ id: runId, config, legs, completedLegs: p.legIndex + 1 }))
+          .catch(() => {});
       },
     });
 
+    await pendingWrites;
     await putLeads(result.leads);
     await saveRun({
       id: runId, config, legs,
@@ -79,7 +129,7 @@ async function exportLeads(filterState) {
 }
 
 const HANDLERS = {
-  [MSG.CAPTURE_PB]: async (payload) => { latestPb = payload.pb; return { captured: true }; },
+  [MSG.CAPTURE_PB]: async (payload) => { await rememberPb(payload.pb); return { captured: true }; },
   [MSG.START_RUN]: (payload) => startRun(payload),
   [MSG.ABORT_RUN]: async () => {
     if (!activeRun) return { aborted: false };
