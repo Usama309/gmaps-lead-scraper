@@ -1806,33 +1806,51 @@ git commit -m "feat: add radius tiling to get past the 247 per query cap"
 - Produces:
   - `PAYLOAD_MAP` object, `PAYLOAD_MAP_VERSION` string
   - `extractRecord(rawRecord) -> Lead`
-  - `extractRecords(parsedPayload) -> Lead[]`
-  - `runCanary(parsedPayload) -> { ok: boolean, problems: string[] }`
+  - `extractPage(parsedPayload) -> { leads, rawCount, skipped }`
+  - `extractRecords(parsedPayload) -> Lead[]` (thin wrapper over extractPage)
+  - `CANARY_RULES` object
+  - `runCanary(parsedPayload) -> { ok, problems, sampled, coverageJudged }`
 
 **Why this task exists:** the payload is plain JSON addressed by positional index. Index drift is the standing risk in this whole project. This module is the only place an index may appear, and the canary makes drift fail loudly instead of silently emitting nulls.
 
 - [ ] **Step 1: Create the fixture**
 
-Create `tests/fixtures/payload-record.json`. This is a sparse array shaped like one real record, with only the indices the map reads populated. Build it with a script so the indices are unambiguous:
+Create `tests/fixtures/payload-record.json`. It holds eight records, deliberately more than
+`CANARY_RULES.minRecordsToJudgeCoverage`, so the coverage floors are actually exercisable. Two
+records intentionally lack a website, mirroring the 67% website coverage measured live. Build it
+with a script so the indices are unambiguous:
 
 ```bash
 mkdir -p tests/fixtures
 node --input-type=module -e "
 import { writeFileSync } from 'node:fs';
-const r = [];
-r[11] = 'Al-Shifa Dental Clinic';
-r[4]  = (() => { const a = []; a[7] = 4.3; a[8] = 87; return a; })();
-r[13] = ['Dentist', 'Dental clinic'];
-r[178] = [['+92 57 261 2201']];
-r[7]  = ['https://alshifadental.com.pk/', 'alshifadental.com.pk'];
-r[9]  = (() => { const a = []; a[2] = 33.7621; a[3] = 72.3489; return a; })();
-r[78] = 'ChIJTestPlaceId';
-r[10] = '0x38df9a1b2c3d4e5f:0x1234567890abcdef';
-r[18] = 'Pleader Lane, Attock, Punjab';
-r[203] = null;
-const payload = []; payload[64] = [[null, r]];
+const BUSINESSES = [
+  ['Al-Shifa Dental Clinic', 4.3, 87, '+92 57 261 2201', 'https://alshifadental.com.pk/', 33.7621, 72.3489],
+  ['Attock Smile Studio', 4.7, 34, '+92 57 264 8890', 'https://attocksmile.wixsite.com/home', 33.7655, 72.3512],
+  ['Malik Dental and Braces', 4.4, 145, '+92 57 270 3355', 'https://malikdental.com/', 33.7702, 72.3601],
+  ['Hazro Auto Works', 4.1, 156, '+92 57 231 9012', null, 33.7588, 72.3402],
+  ['Glow Beauty Salon and Spa', 4.6, 212, '+92 57 261 4408', 'https://facebook.com/glowattock', 33.7614, 72.3455],
+  ['Kamra Physiotherapy Center', 4.8, 41, '+92 57 253 7719', 'https://kamraphysio.com/', 33.7699, 72.3388],
+  ['Royal Barber Lounge', 4.5, 96, '+92 333 447 1160', null, 33.7643, 72.3521],
+  ['Attock Eye Hospital', 4.6, 340, '+92 57 266 4400', 'https://attockeye.com.pk/', 33.7671, 72.3474],
+];
+const records = BUSINESSES.map(([name, rating, reviews, phone, website, lat, lng], i) => {
+  const r = [];
+  r[11] = name;
+  r[4] = (() => { const a = []; a[7] = rating; a[8] = reviews; return a; })();
+  r[13] = ['Dentist', 'Dental clinic'];
+  r[178] = [[phone]];
+  if (website) r[7] = [website, new URL(website).hostname];
+  r[9] = (() => { const a = []; a[2] = lat; a[3] = lng; return a; })();
+  r[78] = 'ChIJTestPlaceId' + i;
+  r[10] = '0x38df9a1b2c3d4e5' + i + ':0x1234567890abcde' + i;
+  r[18] = 'Pleader Lane, Attock, Punjab';
+  r[203] = null;
+  return [null, r];
+});
+const payload = []; payload[64] = records;
 writeFileSync('tests/fixtures/payload-record.json', JSON.stringify(payload));
-console.log('fixture written');
+console.log('fixture written with', records.length, 'records');
 "
 ```
 
@@ -1845,11 +1863,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  PAYLOAD_MAP, PAYLOAD_MAP_VERSION, extractRecord, extractRecords, runCanary,
+  PAYLOAD_MAP, PAYLOAD_MAP_VERSION, CANARY_RULES,
+  extractRecord, extractPage, extractRecords, runCanary,
 } from '../src/sources/payload-map.js';
 
-const payload = JSON.parse(readFileSync(new URL('./fixtures/payload-record.json', import.meta.url), 'utf8'));
-const rawRecord = payload[64][0][1];
+const GOOD = JSON.parse(readFileSync(new URL('./fixtures/payload-record.json', import.meta.url), 'utf8'));
+const firstRaw = GOOD[64][0][1];
+
+/** Mutate every record's value at a mapped field path. */
+function drift(field, value) {
+  const copy = structuredClone(GOOD);
+  const path = PAYLOAD_MAP.record[field];
+  for (const entry of copy[64]) {
+    let cursor = entry[PAYLOAD_MAP.recordWrapper];
+    for (const index of path.slice(0, -1)) cursor = cursor[index];
+    cursor[path[path.length - 1]] = value;
+  }
+  return copy;
+}
 
 test('the map declares a version so drift is traceable', () => {
   assert.match(PAYLOAD_MAP_VERSION, /^\d{4}-\d{2}-\d{2}$/);
@@ -1863,7 +1894,7 @@ test('every mapped path is an array of indices', () => {
 });
 
 test('extractRecord pulls every field from the fixture', () => {
-  const lead = extractRecord(rawRecord);
+  const lead = extractRecord(firstRaw);
   assert.equal(lead.name, 'Al-Shifa Dental Clinic');
   assert.equal(lead.rating, 4.3);
   assert.equal(lead.reviewCount, 87);
@@ -1873,46 +1904,57 @@ test('extractRecord pulls every field from the fixture', () => {
   assert.equal(lead.domain, 'alshifadental.com.pk');
   assert.equal(lead.lat, 33.7621);
   assert.equal(lead.lng, 72.3489);
-  assert.equal(lead.placeId, 'ChIJTestPlaceId');
-  assert.equal(lead.cid, '0x38df9a1b2c3d4e5f:0x1234567890abcdef');
+  assert.equal(lead.placeId, 'ChIJTestPlaceId0');
+  assert.match(lead.cid, /^0x[0-9a-f]+:0x[0-9a-f]+$/);
   assert.equal(lead.address, 'Pleader Lane, Attock, Punjab');
   assert.equal(lead.provenance, 'google-payload');
 });
 
-test('extractRecord survives missing optional fields', () => {
+test('extractRecord survives missing optional fields without inventing data', () => {
   const sparse = []; sparse[11] = 'Nameless Shop'; sparse[10] = '0x1:0x2';
   const lead = extractRecord(sparse);
   assert.equal(lead.name, 'Nameless Shop');
-  assert.equal(lead.rating, null);
+  assert.equal(lead.rating, null, 'a missing rating must be null, never 0');
+  assert.equal(lead.reviewCount, null);
   assert.equal(lead.phone, null);
   assert.equal(lead.websiteTech, 'none');
 });
 
-test('extractRecords reads the record container and skips holes', () => {
-  const withHole = structuredClone(payload);
-  withHole[64].push(null);
-  withHole[64].push([null, null]);
-  assert.equal(extractRecords(withHole).length, 1);
+test('extractPage reads all records and reports the raw count', () => {
+  const page = extractPage(GOOD);
+  assert.equal(page.leads.length, 8);
+  assert.equal(page.rawCount, 8);
+  assert.equal(page.skipped, 0);
 });
 
-test('extractRecords returns an empty array for an empty payload', () => {
+test('extractPage distinguishes an empty container from records that all failed', () => {
   const empty = []; empty[64] = [];
-  assert.deepEqual(extractRecords(empty), []);
+  assert.deepEqual(extractPage(empty), { leads: [], rawCount: 0, skipped: 0 });
+
+  // Eight records present, none with a derivable identity. This must NOT look
+  // the same as an empty page, because the harvester reads an empty page as the
+  // normal end of a leg and would report a completed search.
+  const allBad = []; allBad[64] = Array.from({ length: 8 }, () => {
+    const r = []; r[11] = 'Has A Name But No Identity';
+    const entry = []; entry[PAYLOAD_MAP.recordWrapper] = r; return entry;
+  });
+  const page = extractPage(allBad);
+  assert.equal(page.leads.length, 0);
+  assert.equal(page.rawCount, 8, 'raw count must survive so total extraction failure is detectable');
+  assert.equal(page.skipped, 8);
+});
+
+test('extractRecords stays available as a thin wrapper', () => {
+  assert.equal(extractRecords(GOOD).length, 8);
   assert.deepEqual(extractRecords([]), []);
   assert.deepEqual(extractRecords(null), []);
 });
 
-test('canary passes on a good payload', () => {
-  const { ok, problems } = runCanary(payload);
-  assert.equal(ok, true, `unexpected problems: ${problems.join('; ')}`);
-});
-
-test('canary FAILS when the name index has drifted', () => {
-  const drifted = structuredClone(payload);
-  drifted[64][0][1][11] = null;
-  const { ok, problems } = runCanary(drifted);
-  assert.equal(ok, false);
-  assert.ok(problems.some((p) => /name/i.test(p)));
+test('canary passes on a good payload and judges coverage', () => {
+  const result = runCanary(GOOD);
+  assert.equal(result.ok, true, `unexpected problems: ${result.problems.join('; ')}`);
+  assert.equal(result.sampled, 8);
+  assert.equal(result.coverageJudged, true);
 });
 
 test('canary FAILS when the record container is missing entirely', () => {
@@ -1921,12 +1963,74 @@ test('canary FAILS when the record container is missing entirely', () => {
   assert.ok(problems.some((p) => /no records/i.test(p)));
 });
 
-test('canary FAILS when ratings are no longer numeric', () => {
-  const drifted = structuredClone(payload);
-  drifted[64][0][1][4][7] = 'four point three';
-  const { ok, problems } = runCanary(drifted);
+test('canary FAILS when the name index has drifted to null', () => {
+  const { ok, problems } = runCanary(drift('name', null));
+  assert.equal(ok, false);
+  assert.ok(problems.some((p) => /name/i.test(p)));
+});
+
+test('canary FAILS on a constant-offset shift that lands name on the CID', () => {
+  // The subtle case: name is still a string, so a bare typeof check waves it
+  // through. Only a format check catches it.
+  const { ok, problems } = runCanary(drift('name', '0x38df9a1b2c3d4e5f:0x1234567890abcdef'));
+  assert.equal(ok, false, 'a CID-shaped name means the indices shifted');
+  assert.ok(problems.some((p) => /name/i.test(p)));
+});
+
+test('canary FAILS when the cid index lands on shared text, which would merge businesses', () => {
+  const { ok, problems } = runCanary(drift('cid', 'Pleader Lane, Attock, Punjab'));
+  assert.equal(ok, false);
+  assert.ok(problems.some((p) => /cid/i.test(p)));
+});
+
+test('canary FAILS when the phone index is lost, the field the operator actually calls', () => {
+  const { ok, problems } = runCanary(drift('phone', null));
+  assert.equal(ok, false, 'total phone loss must not pass');
+  assert.ok(problems.some((p) => /phone/i.test(p)));
+});
+
+test('canary FAILS when ratings stop being numeric', () => {
+  const { ok, problems } = runCanary(drift('rating', 'four point three'));
   assert.equal(ok, false);
   assert.ok(problems.some((p) => /rating/i.test(p)));
+});
+
+test('canary FAILS when ratings go all-null, closing the empty-set escape hatch', () => {
+  // An earlier version only validated non-null ratings, so a drift that nulled
+  // every rating left nothing to check and reported healthy.
+  const { ok, problems } = runCanary(drift('rating', null));
+  assert.equal(ok, false);
+  assert.ok(problems.some((p) => /rating/i.test(p)));
+});
+
+test('canary FAILS when coordinates drift out of valid range', () => {
+  assert.equal(runCanary(drift('lat', 999)).ok, false);
+  assert.equal(runCanary(drift('lng', 'seventy two')).ok, false);
+});
+
+test('canary FAILS when review counts stop being integers', () => {
+  assert.equal(runCanary(drift('reviewCount', 'eighty seven')).ok, false);
+});
+
+test('a small sample skips coverage floors but still enforces identity fields', () => {
+  const oneRecord = []; oneRecord[64] = [GOOD[64][0]];
+  const healthy = runCanary(oneRecord);
+  assert.equal(healthy.ok, true);
+  assert.equal(healthy.coverageJudged, false, 'one record is too few to judge a percentage');
+
+  // Identity fields are still absolute, at any sample size.
+  const broken = structuredClone(oneRecord);
+  broken[64][0][PAYLOAD_MAP.recordWrapper][11] = null;
+  assert.equal(runCanary(broken).ok, false, 'a missing name must fail even on one record');
+});
+
+test('CANARY_RULES marks name and cid as required, since they are the record identity', () => {
+  const required = CANARY_RULES.fields.filter((f) => f.required).map((f) => f.field);
+  assert.deepEqual(required.sort(), ['cid', 'name']);
+  for (const rule of CANARY_RULES.fields) {
+    assert.equal(typeof rule.valid, 'function', `${rule.field} needs a validator`);
+    assert.ok(rule.why, `${rule.field} needs an explanation for the operator`);
+  }
 });
 ```
 
@@ -2010,31 +2114,123 @@ export function extractRecord(raw) {
   });
 }
 
-/** Read every record out of a parsed payload. Holes and malformed entries are skipped. */
-export function extractRecords(parsed) {
+/**
+ * Read every record out of a parsed payload.
+ *
+ * Returns counts alongside the leads, because three very different situations
+ * would otherwise collapse into one empty array: no container at all, a container
+ * that is legitimately empty (the normal end of a leg), and a container full of
+ * records that ALL failed extraction. The harvester treats an empty record list
+ * as end-of-list, so without rawCount an index drift that broke every record
+ * would look exactly like a completed search.
+ */
+export function extractPage(parsed) {
   const container = at(parsed, PAYLOAD_MAP.records);
-  if (!Array.isArray(container)) return [];
+  if (!Array.isArray(container)) return { leads: [], rawCount: 0, skipped: 0 };
 
   const leads = [];
+  let rawCount = 0;
+  let skipped = 0;
+
   for (const entry of container) {
     const raw = at(entry, [PAYLOAD_MAP.recordWrapper]);
     if (!raw) continue;
+    rawCount += 1;
     try {
       const lead = extractRecord(raw);
       if (lead.name) leads.push(lead);
+      else skipped += 1;
     } catch {
-      // A record we cannot even derive a key for is unusable. Skipping one bad
-      // record is correct; the canary catches the case where they are ALL bad.
+      // A record we cannot derive a key for is unusable. Skipping one is correct.
+      // The caller compares rawCount against leads.length to catch the case where
+      // they are ALL unusable, which is drift rather than bad luck.
+      skipped += 1;
     }
   }
-  return leads;
+
+  return { leads, rawCount, skipped };
 }
+
+/** Convenience wrapper for callers that only need the leads. */
+export function extractRecords(parsed) {
+  return extractPage(parsed).leads;
+}
+
+/** A Google CID looks like 0x<hex>:0x<hex>. Used to validate, and to detect shifts. */
+const CID_PATTERN = /^0x[0-9a-f]+:0x[0-9a-f]+$/i;
+
+function countDigits(value) {
+  return (String(value).match(/\d/g) ?? []).length;
+}
+
+/**
+ * What a healthy payload looks like, field by field.
+ *
+ * Coverage floors are set well below the live measurement (98% phone, 98% rating,
+ * 67% website on 2026-07-29) so a genuinely thin market does not trip them, while
+ * a total field loss does.
+ *
+ * `required: true` means every record must carry a valid value at any sample size,
+ * because these two fields ARE the record's identity. Everything else is judged on
+ * coverage, and only once the sample is large enough for a fraction to mean anything.
+ */
+export const CANARY_RULES = Object.freeze({
+  minRecordsToJudgeCoverage: 5,
+  fields: Object.freeze([
+    Object.freeze({
+      field: 'name', required: true, minCoverage: 0.95,
+      // Rejecting CID-shaped strings is what catches a constant-offset shift:
+      // move every index by one and `name` lands on the CID hex, which is still
+      // a string and would sail past a bare typeof check.
+      valid: (v) => typeof v === 'string' && v.trim().length > 0 && !CID_PATTERN.test(v),
+      why: 'name must be a non-empty string that is not a CID',
+    }),
+    Object.freeze({
+      field: 'cid', required: true, minCoverage: 0.90,
+      valid: (v) => typeof v === 'string' && CID_PATTERN.test(v),
+      why: 'cid is the primary dedupe key; drift landing it on shared text merges distinct businesses',
+    }),
+    Object.freeze({
+      field: 'phone', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'string' && countDigits(v) >= 7,
+      why: 'phone is the field the operator actually calls; measured at 98% live',
+    }),
+    Object.freeze({
+      field: 'rating', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'number' && v >= 0 && v <= 5,
+      why: 'rating must be a number within 0 to 5',
+    }),
+    Object.freeze({
+      field: 'reviewCount', required: false, minCoverage: 0.50,
+      valid: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0,
+      why: 'review count drives the viability score',
+    }),
+    Object.freeze({
+      field: 'lat', required: false, minCoverage: 0.90,
+      valid: (v) => typeof v === 'number' && v >= -90 && v <= 90,
+      why: 'coordinates feed the fallback dedupe key',
+    }),
+    Object.freeze({
+      field: 'lng', required: false, minCoverage: 0.90,
+      valid: (v) => typeof v === 'number' && v >= -180 && v <= 180,
+      why: 'coordinates feed the fallback dedupe key',
+    }),
+  ]),
+});
 
 /**
  * Assert that a payload still matches the pinned index map.
  *
  * Called once before a run begins, against the first real page. Returns problems
- * rather than throwing so the caller can present them to the operator.
+ * rather than throwing so the caller can show them to the operator.
+ *
+ * Checks three separate things, because presence alone is not enough:
+ *   1. Records exist at the mapped container and wrapper indices.
+ *   2. FORMAT: any value that IS present must look like the field it claims to be.
+ *      This is what catches a shift onto a populated but wrong field, which a
+ *      presence check waves straight through.
+ *   3. COVERAGE: enough records carry each field, judged only once the sample is
+ *      big enough that a fraction means something.
  */
 export function runCanary(parsed) {
   const problems = [];
@@ -2042,33 +2238,64 @@ export function runCanary(parsed) {
 
   if (!Array.isArray(container) || container.length === 0) {
     problems.push(`no records found at index path [${PAYLOAD_MAP.records}]`);
-    return { ok: false, problems };
+    return { ok: false, problems, sampled: 0 };
   }
 
-  const leads = [];
+  const records = [];
   for (const entry of container) {
     const raw = at(entry, [PAYLOAD_MAP.recordWrapper]);
-    if (raw) leads.push(raw);
+    if (raw) records.push(raw);
   }
 
-  if (leads.length === 0) {
+  if (records.length === 0) {
     problems.push(`no records found at wrapper index ${PAYLOAD_MAP.recordWrapper}`);
-    return { ok: false, problems };
+    return { ok: false, problems, sampled: 0 };
   }
 
-  const named = leads.filter((r) => typeof at(r, PAYLOAD_MAP.record.name) === 'string');
-  if (named.length === 0) {
-    problems.push(`name index [${PAYLOAD_MAP.record.name}] yielded no strings across ${leads.length} records`);
+  const judgeCoverage = records.length >= CANARY_RULES.minRecordsToJudgeCoverage;
+
+  for (const rule of CANARY_RULES.fields) {
+    const path = PAYLOAD_MAP.record[rule.field];
+    const values = records.map((r) => at(r, path));
+
+    const present = values.filter((v) => v !== null && v !== undefined);
+    const malformed = present.filter((v) => !rule.valid(v));
+
+    if (malformed.length > 0) {
+      problems.push(
+        `${rule.field} at index path [${path}] returned ${malformed.length} of `
+        + `${present.length} values in the wrong shape (${rule.why}). `
+        + `First offender: ${JSON.stringify(malformed[0]).slice(0, 60)}`
+      );
+      continue;
+    }
+
+    if (rule.required && present.length < records.length) {
+      problems.push(
+        `${rule.field} at index path [${path}] is missing on `
+        + `${records.length - present.length} of ${records.length} records (${rule.why})`
+      );
+      continue;
+    }
+
+    if (judgeCoverage) {
+      const coverage = present.length / records.length;
+      if (coverage < rule.minCoverage) {
+        problems.push(
+          `${rule.field} at index path [${path}] covered only `
+          + `${Math.round(coverage * 100)}% of ${records.length} records, `
+          + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
+        );
+      }
+    }
   }
 
-  const ratings = leads
-    .map((r) => at(r, PAYLOAD_MAP.record.rating))
-    .filter((v) => v !== null);
-  if (ratings.length > 0 && !ratings.every((v) => typeof v === 'number')) {
-    problems.push(`rating index [${PAYLOAD_MAP.record.rating}] returned a non-numeric value`);
-  }
-
-  return { ok: problems.length === 0, problems };
+  return {
+    ok: problems.length === 0,
+    problems,
+    sampled: records.length,
+    coverageJudged: judgeCoverage,
+  };
 }
 ```
 
@@ -2096,7 +2323,7 @@ git commit -m "feat: pin payload indices in one module with a drift canary"
 - Consumes: `CONFIG` from `src/core/config.js`.
 - Produces:
   - `classifyTransport({ status, body }) -> { state: 'ok' | 'blocked', reason: string|null }`
-  - `classifyPage({ transport, recordCount }) -> { state: 'ok' | 'blocked' | 'end_of_list', reason: string|null }`
+  - `classifyPage({ transport, recordCount, rawCount }) -> { state: 'ok' | 'blocked' | 'end_of_list' | 'extraction_failed', reason: string|null }`
   - `nextDelayMs(random = Math.random) -> number`
   - `createLatencyWatch() -> { observe(ms) -> boolean }`
 
@@ -2147,7 +2374,14 @@ test('THE TRAP: a valid response with zero records is end_of_list, never blocked
 
 test('a valid response with records is ok', () => {
   const transport = classifyTransport({ status: 200, body: VALID });
-  assert.equal(classifyPage({ transport, recordCount: 20 }).state, 'ok');
+  assert.equal(classifyPage({ transport, recordCount: 20, rawCount: 20 }).state, 'ok');
+});
+
+test('THE OTHER TRAP: records that arrived but all failed extraction is drift, not end of list', () => {
+  const transport = classifyTransport({ status: 200, body: VALID });
+  const page = classifyPage({ transport, recordCount: 0, rawCount: 20 });
+  assert.equal(page.state, 'extraction_failed');
+  assert.match(page.reason, /drift/i);
 });
 
 test('a blocked transport stays blocked regardless of record count', () => {
@@ -2227,9 +2461,18 @@ export function classifyTransport({ status, body }) {
  * Treating a real block as end-of-list would silently truncate results and the
  * operator would never know the list was incomplete.
  */
-export function classifyPage({ transport, recordCount }) {
+export function classifyPage({ transport, recordCount, rawCount = 0 }) {
   if (transport.state === 'blocked') {
     return { state: 'blocked', reason: transport.reason };
+  }
+  // Records arrived but none survived extraction. That is index drift, not the
+  // end of the results. Without this branch it would be indistinguishable from a
+  // finished leg and the operator would read a truncated list as complete.
+  if (recordCount === 0 && rawCount > 0) {
+    return {
+      state: 'extraction_failed',
+      reason: `${rawCount} records arrived but none could be extracted, which means the payload indices have drifted`,
+    };
   }
   if (recordCount === 0) {
     return { state: 'end_of_list', reason: 'reached the end of results for this leg' };
@@ -2405,6 +2648,28 @@ test('harvestLeg respects the per query cap', async () => {
   assert.ok(result.leads.length <= 260, `runaway: ${result.leads.length}`);
 });
 
+test('harvestLeg treats total extraction failure as drift, not a finished leg', async () => {
+  // Twenty records arrive, none has a derivable identity. Reading that as
+  // end_of_list would report a completed search over a truncated list.
+  const allBad = []; allBad[64] = Array.from({ length: 20 }, () => {
+    const r = []; r[11] = 'Named But Unidentifiable';
+    return [null, r];
+  });
+  let call = 0;
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB,
+    fetchPage: async () => {
+      call += 1;
+      return call === 1
+        ? { status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(20)) }
+        : { status: 200, body: ")]}'\n" + JSON.stringify(allBad) };
+    },
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'canary_failed');
+  assert.ok(result.problems.some((p) => /drift/i.test(p)));
+});
+
 test('harvestLeg aborts when the canary fails on the first page', async () => {
   const drifted = []; drifted[64] = [[null, []]];
   const result = await googlePayloadSource.harvestLeg({
@@ -2417,14 +2682,22 @@ test('harvestLeg aborts when the canary fails on the first page', async () => {
   assert.ok(result.problems.length > 0);
 });
 
-/** Build a payload carrying `count` minimal but valid records. */
+/**
+ * Build a payload carrying `count` records healthy enough to pass the canary.
+ *
+ * Phone and coordinates are required here, not decoration: the canary enforces
+ * coverage floors on both, so a fixture missing them would be rejected as drift.
+ * That is the canary doing its job, so the fixture has to look like real data.
+ */
 function payloadWith(count) {
   const records = [];
   for (let i = 0; i < count; i += 1) {
     const r = [];
     r[11] = `Business ${i}`;
-    r[10] = `0xaaa${i}:0xbbb${i}`;
+    r[10] = `0xaaa${i.toString(16)}:0xbbb${i.toString(16)}`;
     r[4] = (() => { const a = []; a[7] = 4.2; a[8] = 50; return a; })();
+    r[178] = [[`+92 57 261 ${(1000 + i).toString().padStart(4, '0')}`]];
+    r[9] = (() => { const a = []; a[2] = 33.76 + i * 0.001; a[3] = 72.34 + i * 0.001; return a; })();
     records.push([null, r]);
   }
   const p = []; p[64] = records;
@@ -2474,7 +2747,7 @@ Create `src/sources/google-payload.js`:
 
 ```js
 import { CONFIG } from '../core/config.js';
-import { extractRecords, runCanary } from './payload-map.js';
+import { extractPage, runCanary } from './payload-map.js';
 import { classifyTransport, classifyPage, nextDelayMs } from '../pipeline/guard.js';
 
 const SEARCH_ENDPOINT = 'https://www.google.com/search';
@@ -2584,11 +2857,18 @@ export const googlePayloadSource = {
         }
       }
 
-      const pageLeads = extractRecords(parsed);
-      const verdict = classifyPage({ transport, recordCount: pageLeads.length });
+      const extracted = extractPage(parsed);
+      const pageLeads = extracted.leads;
+      const verdict = classifyPage({
+        transport, recordCount: pageLeads.length, rawCount: extracted.rawCount,
+      });
 
       if (verdict.state === 'end_of_list') {
         return { leads, stopReason: 'end_of_list', problems: [] };
+      }
+
+      if (verdict.state === 'extraction_failed') {
+        return { leads, stopReason: 'canary_failed', problems: [verdict.reason] };
       }
 
       leads.push(...pageLeads);
