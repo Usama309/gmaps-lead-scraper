@@ -20,6 +20,12 @@ test('the tiling threshold is absolute so the single-tile path can actually fire
   assert.ok(CONFIG.tiling.minRadiusForTilingKm > 0);
 });
 
+test('tile spacing is an absolute distance, not a fraction of the radius', () => {
+  assert.ok(CONFIG.tiling.spacingKm > 0);
+  assert.equal(CONFIG.tiling.spacingFactor, undefined,
+    'a proportional spacing factor cancels the radius out and pins the grid size');
+});
+
 test('guard knows the valid payload prefix', () => {
   assert.equal(CONFIG.guard.validPrefix, ")]}'");
 });

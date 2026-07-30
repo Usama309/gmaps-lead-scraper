@@ -23,13 +23,22 @@ export const CONFIG = deepFreeze({
   },
 
   tiling: {
-    // Tile spacing as a fraction of the requested radius. 0.6 gives overlapping
-    // coverage so businesses near a tile edge are not missed.
-    spacingFactor: 0.6,
+    // Absolute distance between tile centres. This must NOT be a fraction of the
+    // requested radius: ceil(radius / (radius * factor)) cancels the radius out,
+    // pinning the grid to a constant size and making query density fall as
+    // 1/radius^2. A query's real catch-area depends on business density around
+    // the query point, not on how wide the operator drew the circle, so the
+    // spacing that matters is absolute.
+    // 6 km chosen against the UI's own 15 km default radius: it yields 21 tiles,
+    // comfortably under maxTiles, so the common case never truncates. Tighter
+    // spacing (3 km) tripled the query count for heavily overlapping coverage and
+    // truncated the default search down to about 8 km.
+    spacingKm: 6,
+    // Hard ceiling on queries per run. Reaching it means the requested radius was
+    // larger than maxTiles can cover, which is reported to the operator rather
+    // than silently truncating coverage.
     maxTiles: 25,
-    // Below this radius, one query already covers the area. Must be an absolute
-    // distance: comparing the radius against a fraction of itself is a condition
-    // that can never be true.
+    // Below this radius one query already covers the area, so skip tiling.
     minRadiusForTilingKm: 5,
   },
 
