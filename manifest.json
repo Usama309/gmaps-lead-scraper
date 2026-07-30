@@ -14,6 +14,14 @@
   "side_panel": {
     "default_path": "src/ui/sidepanel/index.html"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://www.google.com/maps/*"],
+      "js": ["src/content/capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
   "permissions": [
     "storage",
     "unlimitedStorage",
