@@ -274,9 +274,18 @@ test('a field collision at a quarter of records aborts, closing the boundary gap
   assert.equal(runCanary(quarter).ok, false);
 });
 
-test('the phone coverage floor sits near its live baseline, not far below it', () => {
-  // Measured 98% live. An earlier 50% floor meant a drift halving real coverage
-  // on the field the operator dials raised no alarm.
+test('a coverage shortfall is reported but does not abort the run', () => {
+  // The floor stays near the live dentist baseline of 98%, because a figure well
+  // under it is worth saying out loud. What changed is the consequence.
+  //
+  // Measured in Attock on 2026-07-31, same code and same day: phone coverage was 98%
+  // for dentists, 65% for beauty salons and 60% for gyms. Treating the shortfall as a
+  // halt aborted the entire beauty salon and gym runs on perfectly good data, because
+  // an 80% floor calibrated on one vertical is not true of the next one.
+  //
+  // Nothing is lost. Real drift is uniform across records, which takes coverage to
+  // zero, and minAnyValid still halts on that. A figure strictly between zero and the
+  // floor describes the CATEGORY, not the indices.
   const phoneRule = CANARY_RULES.fields.find((f) => f.field === 'phone');
   assert.ok(phoneRule.minCoverage >= 0.75, `floor ${phoneRule.minCoverage} is too permissive`);
 
@@ -284,7 +293,21 @@ test('the phone coverage floor sits near its live baseline, not far below it', (
   for (const entry of halfLost[64].slice(0, 4)) {
     entry[PAYLOAD_MAP.recordWrapper][178] = null;
   }
-  assert.equal(runCanary(halfLost).ok, false, 'losing half the phones must abort');
+  const result = runCanary(halfLost);
+  assert.equal(result.ok, true, 'a thin category must not abort the harvest');
+  assert.ok(result.warnings.some((w) => /phone/i.test(w) && /covered only/i.test(w)),
+    `the shortfall must still be reported: ${JSON.stringify(result.warnings)}`);
+});
+
+test('TOTAL loss of the phone field still aborts, which is what drift looks like', () => {
+  // The line between the two: uniform drift zeroes a field, sparse data does not.
+  const allLost = structuredClone(GOOD);
+  for (const entry of allLost[64]) {
+    entry[PAYLOAD_MAP.recordWrapper][178] = null;
+  }
+  const { ok, problems } = runCanary(allLost);
+  assert.equal(ok, false, 'losing EVERY phone is drift, not a thin category');
+  assert.ok(problems.some((p) => /phone/i.test(p)));
 });
 
 test('categories, placeId and address are validated, since scoring and export depend on them', () => {

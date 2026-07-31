@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- [2026-07-31 04:30 AM] Enrichment control on the dashboard: candidate count, live progress, stop,
+  and a real outcome line. Phase 2 Tasks 6 to 8 complete
 - [2026-07-31 03:15 AM] Enrichment wiring: `ENRICH` / `ENRICH_PROGRESS` / `ABORT_ENRICH`, a separate
   concurrency slot from harvest, throttling between fetches, and the domain cache actually consulted
   so two leads sharing a host cost one fetch
@@ -18,6 +20,13 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 04:30 AM] A canary coverage shortfall aborted the whole run. Measured in Attock the same
+  day: phone coverage is 98% for dentists but 65% for beauty salons and 60% for gyms, so an 80% floor
+  calibrated on one vertical returned ZERO businesses for two others. It is now a warning; TOTAL loss
+  of a field still halts, which is what uniform index drift actually looks like. Beauty salon went
+  from 0 to 67 businesses and gym from 0 to 8
+- [2026-07-31 04:30 AM] The enrich button read "Enrich 1 leads", and counted leads rather than
+  websites, which overstates the work about sevenfold on a real harvest
 - [2026-07-31 03:15 AM] A platform detected on a client-rendered page was silently discarded at the
   enrich/schema boundary: `mergeLead` gated every positive finding on `enriched`, which enrichment
   deliberately leaves false for a page too thin to judge an absence. A Next or React site therefore

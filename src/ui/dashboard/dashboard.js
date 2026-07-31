@@ -112,7 +112,13 @@ function enrichCandidateCount(leads) {
 }
 
 function renderEnrichButton(leads) {
-  $('#enrich-count').textContent = enrichCandidateCount(leads);
+  const count = enrichCandidateCount(leads);
+  $('#enrich-count').textContent = count;
+  // "Enrich 1 leads" is the kind of thing that makes a tool feel unfinished. The
+  // noun is "websites" rather than "leads" for a second reason: only leads that
+  // HAVE a site are fetched, so counting leads would overstate the work about
+  // sevenfold on a real harvest.
+  $('#enrich-noun').textContent = count === 1 ? 'website' : 'websites';
   $('#enrich-go').disabled = enriching;
 }
 

@@ -41,9 +41,23 @@ canary rule that aborted every thin-market run, and a hardcoded mockup number in
 `.claude/DECISIONS.md` for the three design rulings behind those fixes.
 
 ## In Progress
-Phase 2, website enrichment and full scoring. Not started; Tier 3 filter fields
-(`email`, `tech`, `mobileFriendly`, `hasChatbot`, `hasBooking`, `hasSocials`, `ownerReplies`,
-`lastReviewDays`) exist in the schema and filter but stay null until Phase 2 populates them.
+**Phase 2, website enrichment: complete and live-verified on 2026-07-31.** 349 tests.
+
+Verified in Comet on the operator's own Usama profile, signed into Google:
+- 83 leads across three keywords, 7 with a real website
+- enrichment: 4 enriched, 2 dead domains, 1 unresolved, in 32 seconds
+- a second pass finished in under 5 seconds, so the domain cache works
+- two leads sharing `classicgyms.shop` cost one fetch and both received the result
+- `qazidentalhospital.com` read as WordPress, mobile friendly, no booking widget, with
+  a real address extracted; a dead domain scored the 35-point band; the one unresolved
+  site correctly stayed provisional rather than being branded dead
+
+**The account-cookie control is proven where it matters.** That profile holds all ten
+Google account cookies. A harvest made 12 requests, every one carrying exactly `NID`
+and nothing else. Zero account cookies reached the wire.
+
+Still to do in Phase 2: `ownerReplies` and `lastReviewDays` remain null, since review
+intelligence is Phase 3.
 
 ## Next Priorities
 1. Run Task 14 Step 7 (live end-to-end verification) and record the results here

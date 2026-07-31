@@ -357,13 +357,27 @@ export function runCanary(parsed, expect = {}) {
       }
     }
 
+    // A coverage shortfall is a WARNING, not a halt, and the reasoning is the file's
+    // own: "real drift is uniform across records". Uniform drift takes coverage to
+    // zero, and `minAnyValid` above already halts on that. A figure strictly between
+    // zero and the floor is therefore telling us about the DATA, not the indices.
+    //
+    // Measured live in Attock on 2026-07-31, same code and same day: phone coverage
+    // was 98% for dentists, 65% for beauty salons and 60% for gyms. The 80% floor was
+    // calibrated on dentists, so it aborted the entire beauty salon and gym runs on
+    // perfectly good data. That is the same mistake as the old reviewCount ordering
+    // rule: a threshold true of one vertical applied to every vertical, turning a
+    // thin category into a hard stop.
     if (judgeCoverage) {
       const coverage = present.length / records.length;
       if (coverage < rule.minCoverage) {
-        problems.push(
+        warnings.push(
           `${rule.field} at index path [${path}] covered only `
           + `${Math.round(coverage * 100)}% of ${records.length} records, `
-          + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
+          + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why}). `
+          + 'Harvesting continues: total loss of a field is caught separately, so a '
+          + 'partial figure means this category carries the field less often, not that '
+          + 'the indices moved'
         );
       }
     }
