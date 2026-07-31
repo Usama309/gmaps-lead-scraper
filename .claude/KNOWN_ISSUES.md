@@ -1,6 +1,17 @@
 # Known Issues
 
 ## Open
+- Tiling buys very little in a thin market. Measured live at 15 km: leg 1 returned 40 businesses and
+  legs 2 through 7 added two more between them, because every tile query returns much the same
+  widened result set and the radius filter then keeps the same local businesses each time. A 21-leg
+  run costs about 20 minutes for that. Worth revisiting in Phase 2: either detect the plateau and
+  stop early, or drop tiling for radii Google already over-serves.
+- A wide run fetches far more than it keeps. At 2 km, 195 of 212 results were discarded as
+  out-of-area, and at 15 km, 1,062 were. The throttle cost is paid on all of them. This is inherent
+  to Google widening a thin search, but an early-stop heuristic would cut it.
+- The extension must be reloaded after any code change AND the Maps tab reloaded afterwards, because
+  `chrome.storage.session` is cleared on extension reload and takes the captured pb with it. Starting
+  a run in that window fails with "no search parameters captured yet". Cosmetic, but confusing.
 - The payload canary's field-collision sweep is anchored on `return finish(` and on literal
   arguments, so a comment containing that exact string, or a call passing a variable, would not be
   counted. Ruled acceptable: the separate `handBuilt === 0` assertion is independent of the pattern,

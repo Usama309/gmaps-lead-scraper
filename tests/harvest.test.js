@@ -404,3 +404,93 @@ test('runHarvest honours an abort signal between legs', async () => {
   assert.equal(result.stopReason, 'aborted');
   assert.equal(called, 1);
 });
+
+test('the requested radius is enforced on results, not merely on tile placement', async () => {
+  // The defect this covers, measured live: a 2 km request returned 211 businesses
+  // with a median distance of 62 km and a furthest of 12,434 km. Google treats the
+  // viewport in a pb as a hint, so the radius has to be applied on the way out.
+  const centre = { lat: 33.7609824, lng: 72.342874 };
+  const near = { ...centre, key: 'near', name: 'Near Clinic' };
+  const far = { lat: 34.0151, lng: 71.5249, key: 'far', name: 'Peshawar Clinic' };
+
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({ leads: [near, far], stopReason: 'end_of_list', problems: [] }),
+  };
+
+  const result = await runHarvest({
+    legs: [{ id: 'l1', query: 'dentist', keyword: 'dentist', tileIndex: 0, ...centre, zoom: 14 }],
+    pb: 'pb',
+    area: { ...centre, radiusKm: 2 },
+    source,
+    delay: async () => {},
+  });
+
+  assert.deepEqual(result.leads.map((l) => l.key), ['near']);
+  assert.equal(result.outsideArea, 1);
+});
+
+test('a lead with no coordinates is kept rather than silently discarded', async () => {
+  const centre = { lat: 33.7609824, lng: 72.342874 };
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({
+      leads: [{ lat: null, lng: null, key: 'unlocatable', name: 'No Coords Clinic' }],
+      stopReason: 'end_of_list',
+      problems: [],
+    }),
+  };
+  const result = await runHarvest({
+    legs: [{ id: 'l1', query: 'dentist', keyword: 'dentist', tileIndex: 0, ...centre, zoom: 14 }],
+    pb: 'pb',
+    area: { ...centre, radiusKm: 2 },
+    source,
+    delay: async () => {},
+  });
+  assert.deepEqual(result.leads.map((l) => l.key), ['unlocatable']);
+  assert.equal(result.outsideArea, 0);
+});
+
+test('an out-of-area lead never occupies a dedupe key', async () => {
+  // Filtering after the dedupe map would let a far-away business claim the key and
+  // block the real one behind it, so the run would report a unique count that
+  // included businesses it then discarded.
+  const centre = { lat: 33.7609824, lng: 72.342874 };
+  const far = { lat: 34.0151, lng: 71.5249, key: 'shared', name: 'Peshawar' };
+  const near = { ...centre, key: 'shared', name: 'Attock' };
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({ leads: [far, near], stopReason: 'end_of_list', problems: [] }),
+  };
+  const result = await runHarvest({
+    legs: [{ id: 'l1', query: 'dentist', keyword: 'dentist', tileIndex: 0, ...centre, zoom: 14 }],
+    pb: 'pb',
+    area: { ...centre, radiusKm: 2 },
+    source,
+    delay: async () => {},
+  });
+  assert.deepEqual(result.leads.map((l) => l.name), ['Attock']);
+});
+
+test('planLegs reports the area it was asked for', () => {
+  const { area } = planLegs({ keywords: ['dentist'], lat: 33.76, lng: 72.34, radiusKm: 2 });
+  assert.deepEqual(area, { lat: 33.76, lng: 72.34, radiusKm: 2 });
+});
+
+test('without an area, every lead is kept', async () => {
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({
+      leads: [{ lat: 0, lng: 0, key: 'anywhere', name: 'Null Island' }],
+      stopReason: 'end_of_list', problems: [],
+    }),
+  };
+  const result = await runHarvest({
+    legs: [{ id: 'l1', query: 'x', keyword: 'x', tileIndex: 0, lat: 33.76, lng: 72.34, zoom: 14 }],
+    pb: 'pb',
+    source,
+    delay: async () => {},
+  });
+  assert.equal(result.leads.length, 1);
+  assert.equal(result.outsideArea, 0);
+});

@@ -22,12 +22,23 @@ tasks implemented). The pipeline runs harvest -> filter -> score -> export end t
 - `src/ui/sidepanel/index.html` + `sidepanel.js` start/stop a harvest and surface COVERAGE CUT
   warnings when the tile cap or leg cap truncates the area actually searched
 
-**Not yet verified live in Chrome.** Task 14 Step 7, the end-to-end run against a real Google
-Maps search (load the extension, run a 2 km harvest, confirm the dashboard populates, filter
-with no network activity, export, and confirm cross-run dedupe and re-harvest merge), has been
-deferred to the operator by explicit instruction and has not been performed by any agent. Phase
-1 is code-complete but not sign-off-complete until that step runs and its actual numbers
-(unique business count, score distribution, exported row count, stop reason) are recorded here.
+**Verified live in Chrome on 2026-07-30.** Task 14 Step 7 has been performed. The extension loads
+with zero manifest, runtime or install errors under the pinned ID `ghnhjhnldonkhjojmclnimghpcgocmce`,
+the two-world capture bridge works against real Google Maps, and the pipeline runs end to end.
+
+Measured, 1 keyword `dentist` at 2 km from 33.7609824, 72.342874:
+- 17 unique businesses, stop reason `completed`, one leg, 40 seconds
+- 195 further results discarded as outside the radius, reported to the operator
+- scores 12 to 60, median 48, every lead correctly marked provisional
+- CSV: 22 columns, 0 ragged rows, `Score provisional` = yes on every row, `Mobile friendly` /
+  `Online booking` / `Email` = unknown rather than blank, 0 cells starting with `=`, `+` or `@`
+- export then re-export with Skip duplicates: 42 rows then 0, cross-run dedupe confirmed
+- abort mid-run is clean, and removes the cookie rule on the way out
+
+The live run found four defects that 260 passing unit tests did not, all now fixed with tests:
+missing review counts caused by `credentials: 'omit'`, a radius that was never applied to results, a
+canary rule that aborted every thin-market run, and a hardcoded mockup number in the dashboard. See
+`.claude/DECISIONS.md` for the three design rulings behind those fixes.
 
 ## In Progress
 Phase 2, website enrichment and full scoring. Not started; Tier 3 filter fields

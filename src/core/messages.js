@@ -16,6 +16,10 @@ export const MSG = Object.freeze({
   RUN_PROGRESS: 'mapprospector/run-progress',
   RUN_BLOCKED: 'mapprospector/run-blocked',
   RUN_COVERAGE: 'mapprospector/run-coverage',
+  // A run that is proceeding, but degraded in a way the operator must know about.
+  // Kept separate from RUN_COVERAGE because that payload has a fixed shape and the
+  // panel's renderer silently ignores anything that does not match it.
+  RUN_NOTICE: 'mapprospector/run-notice',
 });
 
 const KNOWN = new Set(Object.values(MSG));

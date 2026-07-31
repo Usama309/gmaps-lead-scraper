@@ -40,6 +40,12 @@ export function setPbCentre(pb, { lat, lng, zoom }) {
  *
  * `credentials: 'omit'` is a binding requirement, not a default: it guarantees no
  * Google account is attached to any request, so there is no account to suspend.
+ *
+ * You will nonetheless see a Cookie header on the wire, and it is not this line
+ * failing. Google drops the review count from every record on a cookieless request,
+ * so src/sources/anon-cookie.js writes the header back from an explicit allowlist of
+ * account-free cookie names. Keeping `omit` here is what makes that an allowlist:
+ * Chrome contributes nothing, so the only cookie that can travel is one we named.
  */
 async function defaultFetchPage({ query, pb, signal }) {
   const url = new URL(SEARCH_ENDPOINT);

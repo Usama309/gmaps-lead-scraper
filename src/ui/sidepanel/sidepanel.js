@@ -72,6 +72,7 @@ function writeCoverage(c) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === MSG.RUN_COVERAGE) writeCoverage(message.payload);
+  if (message?.type === MSG.RUN_NOTICE) write(message.payload.message, true);
   if (message?.type === MSG.RUN_PROGRESS) {
     const p = message.payload;
     write(`leg ${p.legIndex + 1}/${p.totalLegs}: +${p.freshLeads} new, ${p.uniqueLeads} unique`);

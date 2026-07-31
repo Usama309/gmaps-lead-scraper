@@ -4,6 +4,7 @@ import { googlePayloadSource } from './src/sources/google-payload.js';
 import { filterLeads } from './src/pipeline/filter.js';
 import { toCsv } from './src/export/csv.js';
 import { putLeads, getAllLeads, getExportedKeys, markExported, saveRun } from './src/store/db.js';
+import { installAnonCookieRule, removeAnonCookieRule } from './src/sources/anon-cookie.js';
 
 /** Live run state. One run at a time by design: concurrent runs would race the dedupe pool. */
 let activeRun = null;
@@ -68,8 +69,16 @@ async function startRun(config) {
       throw new Error('no search parameters captured yet. Open Google Maps and run one search first.');
     }
 
-    const { legs, coverage } = planLegs(config);
+    const { legs, coverage, area } = planLegs(config);
     activeRun.legs = legs;
+
+    // Google omits the review count from every record unless the request carries an
+    // anonymous session cookie, and `credentials: 'omit'` suppresses all of them.
+    // This writes back exactly one allowlisted, account-free cookie for the duration
+    // of the run. Advisory, not fatal: without it the run still works, it just loses
+    // the field, and the operator is told so rather than left to guess.
+    const cookieRule = await installAnonCookieRule(chrome);
+    if (!cookieRule.installed) broadcast(MSG.RUN_NOTICE, { message: cookieRule.reason });
 
     // Serialises every store write for this run, so they land in order and can be
     // drained before the run reports done.
@@ -86,6 +95,7 @@ async function startRun(config) {
     const result = await runHarvest({
       legs,
       pb,
+      area,
       source: googlePayloadSource,
       signal: controller.signal,
       // Writes are chained rather than fired and forgotten. Overlapping calls
@@ -127,21 +137,43 @@ async function startRun(config) {
       broadcast(MSG.RUN_BLOCKED, { stopReason: result.stopReason, problems: result.problems });
     }
 
+    // Google widens a search that runs out of local results, so this number is
+    // routinely large and its size is information: it says the requested radius is
+    // thinner than the keyword can fill.
+    if (result.outsideArea > 0) {
+      broadcast(MSG.RUN_NOTICE, {
+        message: `${result.outsideArea} results fell outside the ${config.radiusKm} km radius `
+          + 'and were discarded. Google widens a search when local results run out.',
+      });
+    }
+
     return {
       stopReason: result.stopReason,
       total: result.leads.length,
       completedLegs: result.completedLegs,
       problems: result.problems,
+      outsideArea: result.outsideArea,
       coverage,
     };
   } finally {
+    // Every path out, including abort and failure. A rule left installed keeps
+    // rewriting a header in the operator's browser after the run that needed it is
+    // long gone.
+    await removeAnonCookieRule(chrome);
     activeRun = null;
   }
 }
 
 async function getLeads(filterState) {
   const [leads, exportedKeys] = await Promise.all([getAllLeads(), getExportedKeys()]);
-  return { leads: filterLeads(leads, { ...filterState, exportedKeys }), totalStored: leads.length };
+  return {
+    leads: filterLeads(leads, { ...filterState, exportedKeys }),
+    totalStored: leads.length,
+    // Returned so the Skip duplicates control can state the real number. It used to
+    // carry a figure hardcoded from the mockup, which told the operator that 1,284
+    // businesses had been exported no matter what had actually happened.
+    exportedCount: exportedKeys?.size ?? 0,
+  };
 }
 
 /**

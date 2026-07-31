@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { makeLead } from '../src/core/schema.js';
 import { filterLeads, DEFAULT_FILTER_STATE } from '../src/pipeline/filter.js';
 
@@ -218,4 +219,14 @@ test('every filter key in DEFAULT_FILTER_STATE is documented in the spec set', (
     'minScore', 'skipExported', 'exportedKeys', 'sortBy', 'sortDir',
   ];
   assert.deepEqual(Object.keys(DEFAULT_FILTER_STATE).sort(), expected.sort());
+});
+
+test('the dashboard UI carries no hardcoded counts left over from the mockup', () => {
+  // "1,284 businesses already exported" was baked into the markup and never
+  // replaced, so the Skip duplicates control stated a specific false fact on every
+  // load, including the very first one when nothing had been exported at all.
+  const html = readFileSync(new URL('../src/ui/dashboard/index.html', import.meta.url), 'utf8');
+  const body = html.slice(html.indexOf('<body'));
+  const matches = body.match(/>[^<>]*\b\d{1,3},\d{3}\b[^<>]*</g) ?? [];
+  assert.deepEqual(matches, [], `mockup numbers still in the markup: ${matches.join(' | ')}`);
 });

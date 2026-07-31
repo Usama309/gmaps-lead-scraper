@@ -31,7 +31,9 @@
     "storage",
     "unlimitedStorage",
     "sidePanel",
-    "tabs"
+    "tabs",
+    "cookies",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "https://www.google.com/*",

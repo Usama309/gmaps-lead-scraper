@@ -1,5 +1,5 @@
 import { CONFIG } from '../core/config.js';
-import { planTiles } from './tiling.js';
+import { planTiles, haversineKm } from './tiling.js';
 import { setPbCentre } from '../sources/google-payload.js';
 import { assertSource, assertStopReason } from '../sources/source.js';
 import { nextDelayMs } from './guard.js';
@@ -76,6 +76,12 @@ export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiu
   // short list labelled as short.
   return {
     legs: capped,
+    // The area the operator actually asked for. Carried separately from the legs
+    // because Google treats the viewport in a pb as a hint, not a boundary: asked
+    // for 2 km live and it returned a median of 62 km, with results as far away as
+    // Peshawar. The radius has to be enforced on the way out, since it cannot be
+    // enforced on the way in.
+    area: { lat, lng, radiusKm },
     coverage: {
       tilesPlanned: plan.candidateCount,
       tilesUsed: plan.tiles.length,
@@ -96,10 +102,27 @@ export function planLegs({ keywords, categories = [], lat, lng, zoom = 14, radiu
  * leg: both mean the data we would collect next is untrustworthy, and continuing
  * would produce a partial list the operator might mistake for a complete one.
  */
+/**
+ * Is this lead inside the area the operator asked for?
+ *
+ * A lead with no coordinates is kept. We cannot show it is outside, and silently
+ * discarding a real business because Google omitted its position would be a worse
+ * error than admitting one. The count is reported either way.
+ */
+function insideArea(lead, area) {
+  if (!area || !Number.isFinite(area.radiusKm)) return true;
+  if (!Number.isFinite(lead.lat) || !Number.isFinite(lead.lng)) return true;
+  return haversineKm({ lat: area.lat, lng: area.lng }, { lat: lead.lat, lng: lead.lng }) <= area.radiusKm;
+}
+
 export async function runHarvest({
   legs,
   pb,
   source,
+  // The requested search area. Google honours a pb viewport as a hint only, so
+  // without this a 2 km request returns businesses from the next province. Omitting
+  // it disables the check rather than defaulting to something arbitrary.
+  area = null,
   onProgress = () => {},
   onLeads = () => {},
   signal = null,
@@ -119,6 +142,9 @@ export async function runHarvest({
   const byKey = new Map();
   const problems = [];
   let completedLegs = startAt;
+  // Counted, not swallowed. A run that quietly dropped most of what it fetched
+  // would look like a thin market rather than like a radius doing its job.
+  let outsideArea = 0;
 
   // Index of the first leg that failed without halting the run. Resume restarts
   // from there rather than past it, so a transient network fault costs a repeat
@@ -130,6 +156,7 @@ export async function runHarvest({
     stopReason: assertStopReason(stopReason),
     completedLegs,
     problems,
+    outsideArea,
   });
 
   for (let i = startAt; i < legs.length; i += 1) {
@@ -158,6 +185,12 @@ export async function runHarvest({
 
     const fresh = [];
     for (const lead of result.leads) {
+      // Filtered before the dedupe map, so an out-of-area business never occupies a
+      // key and can never be counted as unique.
+      if (!insideArea(lead, area)) {
+        outsideArea += 1;
+        continue;
+      }
       if (!byKey.has(lead.key)) {
         byKey.set(lead.key, lead);
         fresh.push(lead);

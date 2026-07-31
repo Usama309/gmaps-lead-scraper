@@ -362,29 +362,37 @@ test('a real rating and reviewCount swap aborts on the rating range check', () =
   assert.ok(problems.some((p) => /rating/i.test(p)));
 });
 
-test('a swap whose values BOTH stay in range aborts on the ordering invariant', () => {
-  // The genuinely hard case, and the one a reviewer used to break an earlier
-  // version. Both fields stay numeric and both stay inside their own valid range,
-  // so no per-field check and no equality sweep can see it. Only the relation
-  // between them gives it away: a real business has more reviews than its rating
-  // is high, so reviewCount below rating means those indices exchanged.
+test('a swap of small in-range values is still caught, by the integer check', () => {
+  // The genuinely hard case: both fields stay numeric and stay inside their own
+  // valid range, so no range check and no equality sweep can see it. What gives it
+  // away is that real ratings are fractional, so a swap lands 4.5 in a slot that
+  // must hold a whole number of reviews.
   const swapped = structuredClone(GOOD);
   for (const entry of swapped[64]) {
     const r = entry[PAYLOAD_MAP.recordWrapper];
-    r[4][7] = 4.5;
-    r[4][8] = 2;
+    const rating = r[4][7];
+    r[4][7] = r[4][8] > 5 ? 4 : r[4][8]; // keep the rating slot in range
+    r[4][8] = rating;                     // fractional rating into the count slot
   }
   const { ok, problems } = runCanary(swapped, { lat: 33.7609824, lng: 72.342874 });
-  assert.equal(ok, false, 'reviewCount below rating on every record is a swap');
-  assert.ok(problems.some((p) => /smaller than rating|swapped/i.test(p)));
+  assert.equal(ok, false, 'a fractional value in the reviewCount slot is a swap');
+  assert.ok(problems.some((p) => /reviewCount/i.test(p)));
 });
 
-test('the ordering invariant tolerates a genuinely tiny business', () => {
-  // A brand new listing with 4 reviews and a 4.0 rating is real, not drift.
-  const tiny = structuredClone(GOOD);
-  const r = tiny[64][0][PAYLOAD_MAP.recordWrapper];
-  r[4][7] = 4.0; r[4][8] = 4;
-  assert.equal(runCanary(tiny, { lat: 33.7609824, lng: 72.342874 }).ok, true);
+test('a thin market of one-review businesses is harvested, not rejected', () => {
+  // This is the case that halted the first live run. Live in Attock, 8 of 19 real
+  // dentists carried a 5.0 rating with one to four reviews. An ordering rule read
+  // every one of them as a swapped index and aborted the whole harvest. Businesses
+  // with almost no reviews are the target market, not a drift signal.
+  const thin = structuredClone(GOOD);
+  const counts = [1, 4, 2, 1, 3];
+  thin[64].forEach((entry, i) => {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = 5;
+    r[4][8] = counts[i % counts.length];
+  });
+  const { ok, problems } = runCanary(thin, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, true, `a thin market must harvest, got: ${problems.join('; ')}`);
 });
 
 test('a phone number is rejected in the placeId slot and vice versa', () => {
@@ -402,15 +410,14 @@ test('a phone number is rejected in the placeId slot and vice versa', () => {
 });
 
 test('every canary threshold is a named number on CANARY_RULES, never an inline literal', () => {
-  // All tunables belong in one place. The ordering invariant's ratio was briefly
-  // written inline as `paired.length * 0.9` while every sibling threshold was
-  // named, so this asserts the whole set rather than merely noting the drift.
+  // All tunables belong in one place. A threshold was briefly written inline as
+  // `paired.length * 0.9` while every sibling was named, so this asserts the whole
+  // set rather than merely noting the drift.
   const thresholds = [
     'minRecordsToJudgeCoverage',
     'minRecordsToRequireAnyValid',
     'minRecordsNearQuery',
     'maxFieldCollisionRatio',
-    'minOrderedRatio',
     'maxDistanceFromQueryKm',
   ];
   for (const key of thresholds) {

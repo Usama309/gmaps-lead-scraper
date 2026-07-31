@@ -101,12 +101,28 @@ function clearError() {
   $('#e-toast').classList.remove('on');
 }
 
+/**
+ * State the real number of already-exported businesses.
+ *
+ * The markup shipped with "1,284" baked in from the mockup and nothing ever
+ * replaced it, so the control asserted a specific false fact on every load.
+ */
+function renderExportedCount(count) {
+  const el = $('#f-dupe-hint');
+  if (!el) return;
+  const n = Number.isFinite(count) ? count : 0;
+  el.textContent = n === 1
+    ? 'Hide the 1 business already exported in past runs'
+    : `Hide the ${n.toLocaleString('en-GB')} businesses already exported in past runs`;
+}
+
 async function refresh() {
   try {
-    const { leads, totalStored } = await send(MSG.GET_LEADS, state);
+    const { leads, totalStored, exportedCount } = await send(MSG.GET_LEADS, state);
     clearError();
     renderRows(leads);
     renderStats(leads, totalStored);
+    renderExportedCount(exportedCount);
   } catch (error) {
     // Clear the table as well as showing the message. Leaving the previous rows
     // and counts under an error toast lets the operator read stale numbers as

@@ -29,3 +29,14 @@ test('declares the storage and sidePanel permissions the pipeline needs', () => 
     assert.ok(manifest.permissions.includes(p), `missing permission: ${p}`);
   }
 });
+
+test('declares what the anonymous-cookie rule needs, and nothing broader', () => {
+  for (const p of ['cookies', 'declarativeNetRequestWithHostAccess']) {
+    assert.ok(manifest.permissions.includes(p), `missing permission: ${p}`);
+  }
+  // The WithHostAccess variant is deliberate. Plain "declarativeNetRequest" grants
+  // rule matching across every site the browser visits without any host grant, which
+  // is far more than rewriting one header on our own requests to one endpoint needs.
+  assert.ok(!manifest.permissions.includes('declarativeNetRequest'),
+    'the unscoped declarativeNetRequest permission is broader than this extension needs');
+});

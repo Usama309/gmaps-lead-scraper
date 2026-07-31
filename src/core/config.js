@@ -71,6 +71,30 @@ export const CONFIG = deepFreeze({
     consecutiveBreachesToHalt: 3,
   },
 
+  /**
+   * Google omits the review count entirely unless the request carries an anonymous
+   * session cookie. Measured live on 2026-07-30, same pb, same context, back to
+   * back: cookieless 5% coverage, cookie-bearing 95%. Nothing else in the record
+   * changed, so this single field is the whole cost.
+   *
+   * `credentials: 'omit'` stays, because it is what guarantees Chrome attaches
+   * nothing of its own. The cookie header is then rebuilt from this ALLOWLIST by a
+   * declarativeNetRequest rule. An allowlist rather than a denylist is the point: a
+   * Google ACCOUNT cookie cannot ride along even if Google ships a new cookie name
+   * tomorrow, because anything not named here is simply never written.
+   */
+  anonCookie: {
+    // NID is Google's anonymous preferences cookie. It carries no account.
+    allow: ['NID'],
+    ruleId: 1,
+    urlFilter: '||google.com/search',
+    resourceTypes: ['xmlhttprequest', 'other'],
+    // -1 means "not from a tab", i.e. only requests this worker makes itself. Without
+    // it the rule would also rewrite the Cookie header on Google Maps' OWN requests
+    // in the operator's tab, stripping their real session and breaking the page.
+    workerOnlyTabId: -1,
+  },
+
   enrich: {
     domainCacheTtlDays: 30,
     maxExtraPages: 2,

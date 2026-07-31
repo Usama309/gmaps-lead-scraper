@@ -175,11 +175,23 @@ export const CANARY_RULES = Object.freeze({
   // Two mapped fields holding the same value on more than a quarter of records
   // means the indices collided. Genuine data essentially never does this.
   maxFieldCollisionRatio: 0.25,
-  // The fraction of records whose reviewCount must be at least their rating. Two
-  // numeric fields can swap while both stay individually valid, and only the
-  // ordering between them gives that away. Set below 1 so a genuinely tiny
-  // business, four reviews against a 4.0 rating, does not trip it.
-  minOrderedRatio: 0.9,
+  // There is deliberately NO reviewCount-versus-rating ordering rule here, and the
+  // reason is worth keeping, because an earlier version had one and it halted the
+  // first live run against real data.
+  //
+  // Ratings are capped at 5, so `reviewCount < rating` can only ever be true when
+  // reviewCount is 4 or less. That makes the ordering test fire exclusively on tiny
+  // businesses: live in Attock, 8 of 19 real dentists had a 5.0 rating and one to
+  // four reviews, and every one of them read as "swapped". Small businesses with
+  // almost no reviews are not noise in this product, they are the target market.
+  //
+  // Nothing is lost by dropping it, because a genuine swap is caught upstream and
+  // more reliably. Exchanging the two indices puts the rating into the reviewCount
+  // slot, and real ratings are fractional (4.9, 4.7, 3.9), so
+  // `Number.isInteger` on reviewCount rejects it. It also puts the count into the
+  // rating slot, where anything above 5 fails the range check. A swap would have to
+  // survive BOTH: every rating in the sample a whole number AND every count 5 or
+  // under. Across a 20-record page of real businesses that does not happen.
   // A record's coordinates should sit near the point we queried. A lat/lng swap
   // passes both range checks whenever |longitude| is under 90, which covers most
   // of the inhabited world, so range validation alone cannot catch it.
@@ -345,28 +357,6 @@ export function runCanary(parsed, expect = {}) {
           + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
         );
       }
-    }
-  }
-
-  // Relational invariants. Two numeric fields can swap places while both remain
-  // individually valid, which no per-field validator and no equality sweep can
-  // see. A real business has far more reviews than its rating is high, so the
-  // ordering between them is a cheap, reliable tell.
-  const paired = records
-    .map((r) => ({
-      rating: at(r, PAYLOAD_MAP.record.rating),
-      reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
-    }))
-    .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
-
-  if (paired.length > 0) {
-    const ordered = paired.filter((v) => v.reviewCount >= v.rating);
-    if (ordered.length < paired.length * CANARY_RULES.minOrderedRatio) {
-      problems.push(
-        `reviewCount is smaller than rating on ${paired.length - ordered.length} of `
-        + `${paired.length} records. Real businesses have more reviews than their `
-        + `rating is high, so those two indices have most likely swapped`
-      );
     }
   }
 

@@ -70,3 +70,58 @@ mode this tool has, because the operator cannot detect it from the output.
 **Consequence:** The confirmation can still be lost if the page closes between the click and the
 confirm, but that direction fails safe: the lead is exported again next time rather than never.
 Preferring duplicate work over silent omission is the right bias for a lead list.
+
+## Send one allowlisted anonymous cookie, rather than dropping `credentials: 'omit'`
+**Date:** 2026-07-30 (operator decision, presented with measurements)
+
+Google omits the review count from the search payload on a cookieless request. Measured live, same
+pb and same context back to back: `omit` gave 5% coverage on reviewCount, `include` gave 95%, and no
+other mapped field moved by more than one record out of twenty. Review count carries two of the 21
+requested filters and the entire 20-point viability component, so losing it is not cosmetic.
+
+Three options were put to the operator: keep `omit` and lose the field, switch to `include`, or send
+an anonymous cookie only. They chose the third.
+
+The implementation is an ALLOWLIST, not a denylist, and that distinction is the whole design. The
+fetch stays `credentials: 'omit'`, so Chrome contributes no cookie of its own, and a
+declarativeNetRequest rule then writes the Cookie header from a named list. A Google account cookie
+therefore cannot travel even if Google ships a cookie name nobody has heard of yet. A denylist would
+have started leaking on that day.
+
+Two scoping properties carry as much weight as the allowlist, and both were verified live:
+- the rule is SESSION scoped, so it cannot outlive the browser
+- the rule matches `tabIds: [-1]`, so it applies only to requests the worker makes itself. Verified
+  with a sentinel value: a page-initiated request to the same endpoint still carried the operator's
+  real cookie, not ours. Without that condition the rule would strip their live Maps session.
+
+**Rejected:** `credentials: 'include'`. One line, full data, but in a signed-in browser it attaches
+the operator's Google account to every harvest request, which is the exact risk the control exists
+to prevent.
+
+## Enforce the search radius on results, not on the request
+**Date:** 2026-07-30
+
+Google treats the viewport inside a pb as a hint. Asked for 2 km live and it returned 211
+businesses with a median distance of 62.5 km, a 90th percentile of 82 km, and a furthest result
+12,434 km away. Only 17 were actually within 2 km.
+
+The radius is therefore applied to harvested leads, before the dedupe map so an out-of-area business
+can never occupy a key. Leads without coordinates are kept: we cannot show they are outside, and
+discarding a real business because Google omitted its position is the worse error.
+
+The discard count is reported to the operator rather than swallowed, because its size is
+information. A large number means the radius is thinner than the keyword can fill.
+
+## Remove the reviewCount-versus-rating ordering rule from the canary
+**Date:** 2026-07-30
+
+The rule aborted the first successful live run. Ratings are capped at 5, so `reviewCount < rating`
+can only be true when reviewCount is 4 or less, which means the rule fires exclusively on very small
+businesses. Live in Attock, 8 of 19 real dentists had a 5.0 rating with one to four reviews. Those
+are the target market, not drift.
+
+Nothing was lost by removing it. A genuine index swap puts the rating into the reviewCount slot, and
+real ratings are fractional, so `Number.isInteger` rejects it; it also puts the count into the rating
+slot, where anything above 5 fails the range check. Surviving both would require every rating in a
+20-record sample to be a whole number AND every count to be 5 or under. The replacement test proves
+the integer check is what now carries swap detection: weakening it makes that test fail.

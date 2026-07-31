@@ -117,6 +117,14 @@ empty list quietly.
 **If you see `COVERAGE CUT`:** that is the tool being honest, not an error. It means the caps shrank
 the area actually searched, and it tells you by how much. At 2 km you should not see it.
 
+**You WILL see a line about results falling outside the radius, and it will be a big number.** At
+2 km live it read `195 results fell outside the 2 km radius and were discarded`, against 17 kept.
+That is correct and expected. Google treats the radius as a hint and widens a search when local
+results run out, so it returned businesses as far away as Peshawar. The radius is enforced on our
+side, after the fact, which is the only place it can be enforced. The number is shown rather than
+hidden because its size tells you something real: a large one means the radius is thinner than the
+keyword can fill.
+
 ---
 
 ## 5. Look at the results
@@ -155,10 +163,12 @@ Click **Open dashboard**. A new tab opens with the filter rail and the table.
 - No cell begins with a bare `=` or `@`. Business names that start with those are prefixed with an
   apostrophe so your spreadsheet cannot execute them
 
-3. Go back to the dashboard and click **Export** again with **Skip duplicates** ticked.
+3. Go back to the dashboard and click **Export** again. **Skip duplicates** is ticked by default, so
+   leave it alone.
 
 **Expected:** the count drops to zero. Every lead was already exported, so there is nothing new. That
-proves cross-run deduplication works, which is what stops you phoning the same dentist twice.
+proves cross-run deduplication works, which is what stops you phoning the same dentist twice. Untick
+Skip duplicates and the full count comes back.
 
 4. Re-run the same 2 km harvest from step 4.
 
@@ -168,16 +178,23 @@ proves cross-run deduplication works, which is what stops you phoning the same d
 
 ## What a real run will cost you in time
 
-Once the checklist passes, these are the measured shapes of a run. "Likely" assumes most tiles
-return one or two pages, which is what a town the size of Attock actually gives; "worst case" assumes
-every single leg hits the 247 cap, which will not happen outside a major city.
+These are **measured on 2026-07-30 against Attock**, not estimated. An earlier version of this table
+was estimated and was wrong by roughly an order of magnitude, because it assumed a leg stops early in
+a thin market. It does not: Google widens a search that runs out of local results, so almost every
+leg runs to the 247 cap regardless of how small the town is.
 
-| Search | Query legs | Likely | Worst case | Notes |
-|---|---|---|---|---|
-| 1 keyword, 2 km | 1 | under a minute | under a minute | the first-run setting above |
-| 1 keyword, 15 km | 21 | about 1.5 min | 9 min | full coverage, nothing cut |
-| 3 keywords, 15 km | 60 | about 4 min | 26 min | hits the leg cap, reports COVERAGE CUT |
-| 3 keywords, 30 km | 60 | about 4 min | 26 min | cut on both tiles and legs |
+| Search | Query legs | Measured | Notes |
+|---|---|---|---|
+| 1 keyword, 2 km | 1 | 40 seconds, 17 leads | the first-run setting above |
+| 1 keyword, 15 km | 21 | about 60 seconds per leg, so 20 min | 7 legs in 5 min gave 42 leads |
+
+The second row is the important one, and its shape is worth understanding before you widen anything.
+Leg 1 returned 40 businesses. Legs 2 through 7 added **two more between them**. That is not a fault:
+every tile query returns much the same widened result set, and the radius filter then keeps the same
+local businesses each time. A wider radius mostly buys more waiting.
+
+**The practical advice:** run one keyword at a time and start at 2 km. Widen only when a radius stops
+producing new names.
 
 The throttle is deliberately slow: 1.2 to 2.8 seconds between requests, randomised. That is what
 keeps the run below the rate where recon saw any pressure from Google, and it is the main reason a

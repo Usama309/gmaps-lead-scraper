@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### Fixed
+- [2026-07-30 10:45 PM] Review count was missing from every harvested lead. Google omits it unless
+  the request carries a session cookie, and `credentials: 'omit'` suppressed all of them. Isolated
+  live, same pb and context back to back: cookieless 5% coverage, cookie-bearing 95%
+- [2026-07-30 10:45 PM] The requested radius was never applied to results, only to tile placement.
+  A 2 km search returned a median distance of 62 km and a furthest of 12,434 km
+- [2026-07-30 10:45 PM] The canary's reviewCount-versus-rating ordering rule aborted every run in a
+  thin market. Ratings cap at 5, so the rule could only ever fire on businesses with four reviews or
+  fewer, which is the target market. Swap detection moved to the integer check, which is stronger
+- [2026-07-30 10:45 PM] The Skip duplicates control claimed "1,284 businesses already exported", a
+  number hardcoded from the mockup and never replaced. Now bound to the real count
+- [2026-07-30 10:45 PM] FIRST-RUN.md's timing table was estimated and wrong by about an order of
+  magnitude, and it described the Skip duplicates default backwards
+
+### Added
+- [2026-07-30 10:45 PM] `src/sources/anon-cookie.js`: attaches exactly one allowlisted, account-free
+  cookie to our own requests via a session-scoped declarativeNetRequest rule, scoped to tabId -1 so
+  it cannot touch Google Maps' requests in the operator's own tab
+- [2026-07-30 10:45 PM] `RUN_NOTICE` message, for a run that proceeds but is degraded in a way the
+  operator has to know about
+- [2026-07-30 10:45 PM] 23 tests, each verified to fail against the defect it describes
+
+### Fixed
 - [2026-07-30 08:00 PM] BLOCKER found by the final whole-branch review: the default filter carried
   maxReviews Infinity, which becomes null over the extension message boundary and then compares as
   zero, so the dashboard and CSV silently kept only businesses with no reviews at all
