@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- [2026-07-31 06:15 AM] Phase 3 Task 3: `src/pipeline/review-pass.js` drives the place panel per lead
+  with block detection, selector-drift detection, throttling on the harvester's own timer, resume
+  that never advances past a failure, and a freshness skip keyed on when we last looked
 - [2026-07-31 05:30 AM] Phase 3 Tasks 1 and 2: `src/sources/review-dates.js` parses Google's relative
   review dates, and `src/sources/google-dom.js` reads owner replies and recency off the rendered
   place panel. Both pure and testable in bare Node
@@ -23,6 +26,10 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 06:15 AM] A review-pass patch was dropped whole at the schema boundary, because
+  `ownerReplies` and `lastReviewDays` only merged when `enriched` was true and a review patch is not
+  an enrichment. Same class as the Phase 2 platform defect, found this time by checking the boundary
+  before shipping rather than after
 - [2026-07-31 04:30 AM] A canary coverage shortfall aborted the whole run. Measured in Attock the same
   day: phone coverage is 98% for dentists but 65% for beauty salons and 60% for gyms, so an 80% floor
   calibrated on one vertical returned ZERO businesses for two others. It is now a warning; TOTAL loss

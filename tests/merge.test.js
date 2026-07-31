@@ -169,3 +169,44 @@ test('a transient fetch failure cannot clear a platform found earlier', () => {
   assert.equal(merged.websiteTech, 'wordpress');
   assert.equal(merged.mobileFriendly, false);
 });
+
+test('a review-pass patch survives the merge, which it did not before', () => {
+  // The boundary defect, found by checking it deliberately rather than by shipping.
+  // A review patch carries enriched: false, so gating these fields on `enriched`
+  // dropped the entire patch in silence. Exactly what happened to the platform
+  // reading in Phase 2, one phase earlier.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'Clinic', placeId: 'ChIJx' });
+  const patch = {
+    ...stored,
+    ownerReplies: true, lastReviewDays: 12, lastReviewPrecise: true,
+    reviewsReadAt: '2026-07-31T00:00:00.000Z',
+  };
+  const merged = mergeLead(stored, patch);
+  assert.equal(merged.ownerReplies, true);
+  assert.equal(merged.lastReviewDays, 12);
+  assert.equal(merged.lastReviewPrecise, true);
+  assert.equal(merged.reviewsReadAt, '2026-07-31T00:00:00.000Z');
+});
+
+test('an owner who replies to nothing merges as false, not as absent', () => {
+  // `false` here is a real observation: we read the panel and no reply was there.
+  // An emptiness test that treated false as nothing would leave the field null and
+  // the operator's "no owner replies" filter would never match anyone.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'Clinic', placeId: 'ChIJx' });
+  const merged = mergeLead(stored, {
+    ...stored, ownerReplies: false, reviewsReadAt: '2026-07-31T00:00:00.000Z',
+  });
+  assert.equal(merged.ownerReplies, false);
+});
+
+test('a plain re-harvest does not clear review data', () => {
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'Clinic', placeId: 'ChIJx',
+    ownerReplies: true, lastReviewDays: 12, reviewsReadAt: '2026-07-31T00:00:00.000Z',
+  });
+  const reharvest = makeLead({ cid: '0xa:0xb', name: 'Clinic', placeId: 'ChIJx' });
+  const merged = mergeLead(stored, reharvest);
+  assert.equal(merged.ownerReplies, true, 'a harvest never looked at reviews and must not erase them');
+  assert.equal(merged.lastReviewDays, 12);
+  assert.equal(merged.reviewsReadAt, '2026-07-31T00:00:00.000Z');
+});

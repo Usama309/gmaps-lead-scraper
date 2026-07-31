@@ -14,6 +14,12 @@ export const LEAD_FIELDS = [
   // Enrichment. null means unknown, which is not the same as false.
   'enriched', 'websiteTech', 'mobileFriendly', 'hasBooking', 'hasChatbot',
   'email', 'socials', 'ownerReplies', 'lastReviewDays',
+  // Review pass. `lastReviewPrecise` is false once Google's relative date reaches
+  // months, because "6 months ago" could be 152 days or 195 and the export must not
+  // imply a precision nobody has. `reviewsReadAt` is when we last LOOKED, which is
+  // what freshness keys on: a business with no reviews has null recency forever, so
+  // keying on the value would re-read it every pass for the rest of its life.
+  'lastReviewPrecise', 'reviewsReadAt',
 ];
 
 /**
@@ -87,6 +93,8 @@ export function makeLead(partial = {}) {
     socials: Array.isArray(partial.socials) ? partial.socials : [],
     ownerReplies: partial.ownerReplies ?? null,
     lastReviewDays: partial.lastReviewDays ?? null,
+    lastReviewPrecise: partial.lastReviewPrecise ?? null,
+    reviewsReadAt: partial.reviewsReadAt ?? null,
   };
 
   lead.key = leadKey(lead);
@@ -213,6 +221,20 @@ export function mergeLead(existing, incoming) {
     if (incomingSocials.length > 0) {
       merged.socials = [...new Set([...(existing.socials ?? []), ...incomingSocials])];
     }
+  }
+
+  // The review pass is its own provenance, with its own marker, for the same reason
+  // enrichment has `inspected`: `enriched` is false on a review patch, so gating
+  // these on it dropped the entire patch silently. Caught by checking this boundary
+  // deliberately after the same thing happened to the platform reading in Phase 2.
+  //
+  // `ownerReplies: false` is a real observation and must merge, which is why the
+  // emptiness test is used rather than a truthiness one.
+  if (incoming.reviewsReadAt) {
+    merged.reviewsReadAt = incoming.reviewsReadAt;
+    if (!isEmpty(incoming.ownerReplies)) merged.ownerReplies = incoming.ownerReplies;
+    if (!isEmpty(incoming.lastReviewDays)) merged.lastReviewDays = incoming.lastReviewDays;
+    if (!isEmpty(incoming.lastReviewPrecise)) merged.lastReviewPrecise = incoming.lastReviewPrecise;
   }
 
   // Everything else waits for a record that was actually enriched, because the rest

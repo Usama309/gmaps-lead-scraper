@@ -110,6 +110,26 @@ export const CONFIG = deepFreeze({
     workerOnlyTabId: -1,
   },
 
+  /**
+   * The review pass: a second read over the RENDERED place panel, because owner
+   * replies and review recency exist nowhere else. Confirmed on 2026-07-31 by
+   * scanning every numeric leaf of a live search payload: no timestamps at all.
+   *
+   * This is the only stage that cannot use `credentials: 'omit'`, because a rendered
+   * page needs a real session. It is therefore the one attributable thing the product
+   * does, which is why it paces conservatively and stops dead on any block.
+   */
+  reviewPass: {
+    // Measured live 2026-07-31: about 7 seconds of interaction plus 5 to 8 of page
+    // load. Used to warn the operator what a run will cost BEFORE it starts, since
+    // 500 leads is nearly two hours.
+    secondsPerLead: 13,
+    // A lead read this recently is not worth 13 seconds again. Review activity moves
+    // on a scale of weeks, not hours.
+    recheckAfterDays: 30,
+    placeUrlPrefix: 'https://www.google.com/maps/place/?q=place_id:',
+  },
+
   enrich: {
     domainCacheTtlDays: 30,
     maxExtraPages: 2,
