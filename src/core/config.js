@@ -114,6 +114,17 @@ export const CONFIG = deepFreeze({
     domainCacheTtlDays: 30,
     maxExtraPages: 2,
     fetchTimeoutMs: 12000,
+    // Measured live 2026-07-30: a client-rendered shell
+    // (smilecraftbysohail.bolt.host) returned exactly 1 KB of markup for a page
+    // whose real content only exists after JavaScript runs. Set well above that
+    // and well below the smallest real page recon saw (19 KB), so a genuinely
+    // terse static page is never mistaken for a shell we learned nothing from.
+    minUsefulHtmlBytes: 2048,
+    // Bounds how much of a response body enrichment ever holds in memory. Sized
+    // generously above the largest real page recon measured (302 KB) so no real
+    // prospect site ever hits it; it exists only so one huge or runaway response
+    // cannot exhaust the worker.
+    maxResponseBytes: 2 * 1024 * 1024,
   },
 
   export: {
