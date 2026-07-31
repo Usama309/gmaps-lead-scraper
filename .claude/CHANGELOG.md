@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- [2026-07-31 02:30 AM] Phase 2 begins. `src/core/fingerprints.js`: platform, chatbot, booking, social
+  and mobile-friendliness detectors, matching raw markup because the MV3 worker has no DOMParser
+- [2026-07-31 02:30 AM] `src/pipeline/enrich.js`: `scanHtml` (pure) plus `enrichOne` / `enrichLeads`.
+  A dead domain is a 35-point scoring signal rather than an error; an UNEXPLAINED failure leaves the
+  lead unenriched instead, so one transient fault cannot permanently score a live business as dead
+- [2026-07-31 02:30 AM] The JavaScript-shell outcome, found in live recon: a 200 response carrying
+  too little markup to read leaves the boolean signals null and the lead provisional. Positive
+  evidence such as a mailto or a WordPress asset path is still taken, because a signal that IS
+  present is real at any page size, while its absence is only meaningful once there is markup to
+  read. Phase 1's domain cache already satisfied the planned Task 2
+
 ### Fixed
 - [2026-07-31 01:30 AM] Third review, three blockers, all from one root cause I introduced: canary
   notices were merged into `problems`. `completed_with_errors` keys off that array, and FIRST-RUN.md

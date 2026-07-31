@@ -218,11 +218,9 @@ async function defaultFetchPage({ url, signal }) {
  * classification only; every actual signal comes from `scanHtml`, which this
  * calls with the response body.
  *
- * `fetchPage` is injected so no test here ever hits the network. `now` is
- * accepted for symmetry with `enrichLeads`, which stamps its returned stats with
- * the same clock; nothing in this function's own classification is time-based.
+ * `fetchPage` is injected so no test here ever hits the network.
  */
-export async function enrichOne({ lead, fetchPage = defaultFetchPage, now = Date.now }) {
+export async function enrichOne({ lead, fetchPage = defaultFetchPage }) {
   let response;
   try {
     response = await fetchPage({
@@ -274,7 +272,7 @@ export async function enrichLeads({ leads, fetchPage, now = Date.now, signal = n
   for (const lead of candidates) {
     if (signal?.aborted) break;
 
-    const patch = await enrichOne({ lead, fetchPage, now });
+    const patch = await enrichOne({ lead, fetchPage });
     patches.push({ key: lead.key, ...patch });
 
     if (patch.websiteTech === 'dead') stats.dead += 1;
