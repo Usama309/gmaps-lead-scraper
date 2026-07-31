@@ -202,3 +202,22 @@ test('placeUrl needs a placeId, since a CID alone opens no panel', () => {
   assert.equal(placeUrl({ placeId: null, cid: '0xa:0xb' }), null);
   assert.ok(placeUrl({ placeId: 'ChIJx' }).startsWith(CONFIG.reviewPass.placeUrlPrefix));
 });
+
+test('the estimate the UI shows is the same one the worker sends', () => {
+  // Two places tell the operator what a pass will cost. If they disagree, one of them
+  // is lying, and the button is the one they read first.
+  for (const n of [1, 30, 83, 500]) {
+    assert.equal(estimateMinutes(n), Math.ceil((n * CONFIG.reviewPass.secondsPerLead) / 60));
+  }
+});
+
+test('a resume point of zero is only reported for a genuinely complete pass', async () => {
+  // The dashboard stores completedLeads as the next startAt and resets to 0 only on
+  // 'completed'. A halt that reported completedLeads equal to the total would make
+  // the next press silently do nothing.
+  const driver = fakeDriver({ blockAt: 2 });
+  const result = await run([lead(1), lead(2), lead(3)], driver);
+  assert.equal(result.stopReason, 'blocked');
+  assert.ok(result.completedLeads < 3, 'a blocked pass must leave work to resume');
+  assert.ok(result.completedLeads >= 1, 'and must not throw away what it finished');
+});

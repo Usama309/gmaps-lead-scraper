@@ -1,5 +1,6 @@
 import { MSG, makeRequest } from '../../core/messages.js';
 import { DEFAULT_FILTER_STATE } from '../../pipeline/filter.js';
+import { estimateMinutes } from '../../pipeline/review-pass.js';
 
 const state = { ...DEFAULT_FILTER_STATE, exportedKeys: null };
 
@@ -8,6 +9,9 @@ const state = { ...DEFAULT_FILTER_STATE, exportedKeys: null };
 // tracks its own concurrency slot (activeEnrich) independently, this only
 // drives which controls are enabled and visible.
 let enriching = false;
+let reviewRunning = false;
+// Where the next pass should pick up. Survives a stop, which is the point.
+let reviewResumeAt = 0;
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -182,6 +186,66 @@ function renderExportedCount(count) {
     : `Hide the ${n.toLocaleString('en-GB')} businesses already exported in past runs`;
 }
 
+/**
+ * State what a review pass will cost BEFORE it is started.
+ *
+ * The operator chose to run this over every harvested lead, and at the measured 13
+ * seconds each that is nearly two hours for 500. A button that starts a two-hour job
+ * without saying so is the kind of thing you only forgive once.
+ */
+function renderReviewButton(totalStored) {
+  const count = Number.isFinite(totalStored) ? totalStored : 0;
+  $('#review-count').textContent = count;
+  $('#review-noun').textContent = count === 1 ? 'lead' : 'leads';
+  $('#review-estimate').textContent = count === 0
+    ? ''
+    : `About ${estimateMinutes(count)} minutes, and it can be stopped and resumed.`;
+  $('#review-go').disabled = reviewRunning;
+}
+
+function setReviewRunning(running) {
+  reviewRunning = running;
+  $('#review-go').disabled = running;
+  $('#review-progress').hidden = !running;
+  if (!running) {
+    $('#review-bar').style.width = '0%';
+    $('#review-done').textContent = '0';
+    $('#review-total').textContent = '0';
+  }
+}
+
+function updateReviewProgress({ index, total, name, status }) {
+  const done = index + 1;
+  $('#review-done').textContent = done;
+  $('#review-total').textContent = total;
+  $('#review-bar').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+  // Naming the business is what distinguishes a slow job from a hung one over two hours.
+  $('#review-current').textContent = name ? `${status === 'fresh' ? 'Skipping' : 'Reading'} ${name}` : 'Reading\u2026';
+}
+
+/**
+ * Report what the pass actually did, and whether there is more to do.
+ *
+ * A pass that stopped early must say so plainly. The operator chose to run this over
+ * everything, so "stopped at 40 of 500" is the difference between resuming and
+ * assuming it finished.
+ */
+function reportReviewOutcome(out) {
+  const parts = [`${out.read} read`];
+  if (out.skipped) parts.push(`${out.skipped} already fresh`);
+
+  if (out.stopReason === 'blocked') {
+    parts.push('STOPPED: Google served an interstitial. Leave it a while before resuming.');
+  } else if (out.stopReason === 'selector_drift') {
+    parts.push('STOPPED: the Maps markup has changed and the reader needs updating.');
+  } else if (out.stopReason === 'aborted') {
+    parts.push(`stopped at ${out.completedLeads}, press again to resume from there`);
+  } else if (out.stopReason === 'completed_with_errors') {
+    parts.push(`some leads could not be read, resuming picks up at ${out.completedLeads}`);
+  }
+  $('#review-result').textContent = `${parts.join('. ')}.`;
+}
+
 async function refresh() {
   try {
     const { leads, totalStored, exportedCount, hiddenAsDuplicates } = await send(MSG.GET_LEADS, state);
@@ -189,6 +253,7 @@ async function refresh() {
     renderRows(leads);
     renderStats(leads, totalStored, hiddenAsDuplicates);
     renderExportedCount(exportedCount);
+    renderReviewButton(totalStored);
     renderEnrichButton(leads);
   } catch (error) {
     // Clear the table as well as showing the message. Leaving the previous rows
@@ -303,11 +368,39 @@ function bind() {
       showError(error.message);
     }
   });
+
+  $('#review-go').addEventListener('click', async () => {
+    if (reviewRunning) return;
+    clearError();
+    $('#review-result').textContent = '';
+    setReviewRunning(true);
+    try {
+      // `startAt` is the resume point the last pass returned. A two-hour job that
+      // restarts from zero after an interruption is a job nobody ever finishes.
+      const out = await send(MSG.REVIEW_PASS, { startAt: reviewResumeAt });
+      reviewResumeAt = out.stopReason === 'completed' ? 0 : out.completedLeads;
+      reportReviewOutcome(out);
+      await refresh();
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      setReviewRunning(false);
+    }
+  });
+
+  $('#review-stop').addEventListener('click', async () => {
+    try {
+      await send(MSG.ABORT_REVIEW_PASS, {});
+    } catch (error) {
+      showError(error.message);
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === MSG.RUN_PROGRESS) refresh();
   if (message?.type === MSG.ENRICH_PROGRESS) updateEnrichProgress(message.payload);
+  if (message?.type === MSG.REVIEW_PASS_PROGRESS) updateReviewProgress(message.payload);
 });
 
 bind();

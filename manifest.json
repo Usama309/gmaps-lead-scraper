@@ -16,14 +16,22 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.google.com/maps/*"],
-      "js": ["src/content/main-world.js"],
+      "matches": [
+        "https://www.google.com/maps/*"
+      ],
+      "js": [
+        "src/content/main-world.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://www.google.com/maps/*"],
-      "js": ["src/content/bridge.js"],
+      "matches": [
+        "https://www.google.com/maps/*"
+      ],
+      "js": [
+        "src/content/bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -33,7 +41,8 @@
     "sidePanel",
     "tabs",
     "cookies",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "scripting"
   ],
   "host_permissions": [
     "https://www.google.com/*",
@@ -42,8 +51,12 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/ui/dashboard/index.html"],
-      "matches": ["https://www.google.com/*"]
+      "resources": [
+        "src/ui/dashboard/index.html"
+      ],
+      "matches": [
+        "https://www.google.com/*"
+      ]
     }
   ]
 }

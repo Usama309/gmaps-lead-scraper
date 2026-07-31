@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
-  readReviewPanel, assertSelectorsAlive, statedReviewCount, hasReviewsUi, REVIEW_SELECTORS,
+  readReviewPanel, assertSelectorsAlive, statedReviewCount, hasReviewsUi,
+  interpretPanel, assertRawSelectorsAlive, REVIEW_SELECTORS,
 } from '../src/sources/google-dom.js';
 
 /**
@@ -149,4 +151,46 @@ test('every selector lives in one frozen object', () => {
     assert.equal(typeof value, 'string', `${name} must be a selector string`);
     assert.ok(value.length > 0, `${name} must not be empty`);
   }
+});
+
+test('the injected reader carries the same selectors, since it cannot import them', () => {
+  // review-reader.js is injected as a classic script, so it cannot import and holds
+  // its own copy. This is the guard that stops the copies drifting, and it is the same
+  // arrangement main-world.js has for its message constant.
+  const source = readFileSync(new URL('../src/content/review-reader.js', import.meta.url), 'utf8');
+  for (const [name, selector] of Object.entries(REVIEW_SELECTORS)) {
+    assert.ok(
+      source.includes(`${name}: '${selector}'`),
+      `review-reader.js must carry ${name}: '${selector}', or the two copies have drifted`,
+    );
+  }
+});
+
+test('the injected reader imports nothing, or it will not parse when injected', () => {
+  const source = readFileSync(new URL('../src/content/review-reader.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /^\s*import\s/m,
+    'a classic script cannot import; an import here is a SyntaxError and nothing runs');
+});
+
+test('interpretPanel applies the same rules as the doc reader', () => {
+  // Two entry points, one set of semantics. If they diverge, one path silently
+  // reports different facts than the other about the same page.
+  const raw = { hasReviewsUi: true, rows: [{ date: '3 days ago', hasReply: false }, { date: 'a year ago', hasReply: true }] };
+  const viaRaw = interpretPanel(raw);
+  const viaDoc = readReviewPanel(panel({
+    rows: [review({ date: '3 days ago' }), review({ date: 'a year ago', reply: true })],
+    hasSort: true,
+  }));
+  assert.deepEqual(viaRaw, viaDoc);
+});
+
+test('interpretPanel keeps the null-versus-false distinction', () => {
+  assert.equal(interpretPanel({ hasReviewsUi: true, rows: [] }).ownerReplies, null);
+  assert.equal(interpretPanel({ hasReviewsUi: false, rows: [] }).ownerReplies, false);
+  assert.equal(interpretPanel({ hasReviewsUi: true, rows: [] }).lastReviewDays, null);
+});
+
+test('drift detection works on the raw shape too', () => {
+  assert.throws(() => assertRawSelectorsAlive({ hasReviewsUi: true, rows: [] }), /markup has changed/i);
+  assert.doesNotThrow(() => assertRawSelectorsAlive({ hasReviewsUi: false, rows: [] }));
 });

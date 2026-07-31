@@ -609,6 +609,25 @@
         </div>
 
         <p class="mp-hint" id="enrich-result"></p>
+
+        <div class="mp-field">
+          <button type="button" class="mp-go" id="review-go">Read reviews for <span id="review-count">0</span> <span id="review-noun">leads</span></button>
+          <p class="mp-hint">Reads owner replies and how recently each business was reviewed, which
+            fills the last two filters. This one opens real Maps pages in your own session, so it is
+            slow and it is the only part of this tool that is traceable to your Google account.
+            <strong id="review-estimate"></strong></p>
+        </div>
+
+        <div class="mp-field" id="review-progress" hidden>
+          <div class="mp-prog-label">
+            <span id="review-current">Reading&hellip;</span>
+            <span><span id="review-done">0</span> of <span id="review-total">0</span></span>
+          </div>
+          <div class="mp-bar"><i id="review-bar" style="width:0%"></i></div>
+          <button type="button" class="mp-chip" id="review-stop">Stop</button>
+        </div>
+
+        <p class="mp-hint" id="review-result"></p>
       </section>
     </aside>
 

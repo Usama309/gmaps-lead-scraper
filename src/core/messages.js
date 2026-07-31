@@ -32,6 +32,17 @@ export const MSG = Object.freeze({
   // one name for both would either abort the wrong one or have to guess which
   // slot the operator meant.
   ABORT_ENRICH: 'mapprospector/abort-enrich',
+
+  // Phase 3: the review pass. Its own slot and its own abort for the same reason
+  // enrichment has them, and one more besides: this is the only stage that runs in a
+  // real session carrying the operator's account, so it must be stoppable on its own
+  // without touching anything else that happens to be running.
+  REVIEW_PASS: 'mapprospector/review-pass',
+  REVIEW_PASS_PROGRESS: 'mapprospector/review-pass-progress',
+  ABORT_REVIEW_PASS: 'mapprospector/abort-review-pass',
+  // Sent BEFORE the pass starts, because 500 leads is nearly two hours and the
+  // operator should learn that from us rather than from the clock.
+  REVIEW_PASS_ESTIMATE: 'mapprospector/review-pass-estimate',
 });
 
 const KNOWN = new Set(Object.values(MSG));

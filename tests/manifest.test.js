@@ -40,3 +40,9 @@ test('declares what the anonymous-cookie rule needs, and nothing broader', () =>
   assert.ok(!manifest.permissions.includes('declarativeNetRequest'),
     'the unscoped declarativeNetRequest permission is broader than this extension needs');
 });
+
+test('declares the scripting permission the review pass needs, and no host beyond Google', () => {
+  // The review pass injects a reader into a Maps place page. It needs `scripting`
+  // and nothing more: the host access it uses is already declared.
+  assert.ok(manifest.permissions.includes('scripting'), 'the review pass cannot inject without it');
+});

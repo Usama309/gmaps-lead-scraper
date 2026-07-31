@@ -161,3 +161,50 @@ export function readReviewPanel(doc) {
     reviewsSeen: rows.length,
   };
 }
+
+/**
+ * Interpret what the injected reader saw.
+ *
+ * The reader touches the DOM and decides nothing; this decides everything and touches
+ * no DOM, so the three-state rules live somewhere testable in bare Node. Same split
+ * and same reason as scanHtml in enrich.js.
+ *
+ * `raw` is `{ blocked, hasReviewsUi, rows: [{ date, hasReply }] }`.
+ */
+export function interpretPanel(raw) {
+  const rows = Array.isArray(raw?.rows) ? raw.rows : [];
+
+  if (rows.length === 0) {
+    return {
+      // No rows AND no sort control is a business with no reviews, which is a real
+      // observation: nobody has replied because nobody has reviewed. No rows WITH a
+      // sort control is a page whose reviews we failed to read, which says nothing
+      // about the business and must stay null.
+      ownerReplies: raw?.hasReviewsUi ? null : false,
+      lastReviewDays: null,
+      precise: false,
+      reviewsSeen: 0,
+    };
+  }
+
+  const newest = newestReviewDays(rows.map((row) => row.date));
+
+  return {
+    ownerReplies: rows.some((row) => row.hasReply === true),
+    lastReviewDays: newest.days,
+    precise: newest.precise,
+    reviewsSeen: rows.length,
+  };
+}
+
+/** The same drift check, against what the injected reader returned. */
+export function assertRawSelectorsAlive(raw) {
+  if (raw?.hasReviewsUi && (raw.rows?.length ?? 0) === 0) {
+    throw new Error(
+      `the panel offers ${REVIEW_SELECTORS.sortControl} but ${REVIEW_SELECTORS.row} matched no `
+      + 'reviews. The Maps markup has changed and the review pass would silently report nulls '
+      + 'for every business. Re-derive the selectors in src/sources/google-dom.js AND in '
+      + 'src/content/review-reader.js, which carries its own copy.'
+    );
+  }
+}

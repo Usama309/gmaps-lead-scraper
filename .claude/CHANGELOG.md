@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- [2026-07-31 07:00 AM] Phase 3 Task 4: the review pass is wired end to end. `scripting` permission,
+  a reusable background tab, `REVIEW_PASS` / `REVIEW_PASS_PROGRESS` / `ABORT_REVIEW_PASS` /
+  `REVIEW_PASS_ESTIMATE`, and a dashboard control that states the cost in minutes BEFORE it starts,
+  names the business being read so a two-hour job is distinguishable from a hung one, and resumes
+  from where a stop left it
 - [2026-07-31 06:15 AM] Phase 3 Task 3: `src/pipeline/review-pass.js` drives the place panel per lead
   with block detection, selector-drift detection, throttling on the harvester's own timer, resume
   that never advances past a failure, and a freshness skip keyed on when we last looked

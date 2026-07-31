@@ -9,9 +9,13 @@ import {
   getDomainCache, putDomainCache,
 } from './src/store/db.js';
 import { installAnonCookieRule, removeAnonCookieRule } from './src/sources/anon-cookie.js';
+import { runReviewPass, estimateMinutes } from './src/pipeline/review-pass.js';
+import { createTabDriver } from './src/pipeline/tab-driver.js';
 
 /** Live run state. One run at a time by design: concurrent runs would race the dedupe pool. */
 let activeRun = null;
+/** Its own slot. The review pass and a harvest are independent and must not block each other. */
+let activeReviewPass = null;
 /**
  * Live enrichment state. Its own slot, separate from activeRun: a harvest and
  * an enrichment pass are different operations with different lifetimes, and
@@ -324,6 +328,77 @@ async function runEnrich(filterState) {
   }
 }
 
+/**
+ * Read review recency and owner replies for every stored lead.
+ *
+ * The operator chose, on 2026-07-31, to run this over everything rather than a
+ * shortlist. That is their call, but it makes the cost real: at the measured 13
+ * seconds a lead, 500 leads is nearly two hours. The estimate is broadcast BEFORE the
+ * first page opens so they learn it from us rather than from the clock.
+ *
+ * This is the only stage that runs in a real session carrying their Google account,
+ * so it stops on the first block rather than pushing through, and it resumes, because
+ * something will interrupt a two-hour job.
+ */
+async function runReviewPassJob(payload) {
+  if (activeReviewPass) throw new Error('a review pass is already in progress');
+
+  const controller = new AbortController();
+  activeReviewPass = { controller };
+
+  let driver = null;
+  try {
+    const leads = await getAllLeads();
+    const startAt = Number.isInteger(payload?.startAt) ? payload.startAt : 0;
+
+    broadcast(MSG.REVIEW_PASS_ESTIMATE, {
+      leads: leads.length,
+      remaining: Math.max(0, leads.length - startAt),
+      estimatedMinutes: estimateMinutes(Math.max(0, leads.length - startAt)),
+    });
+
+    driver = createTabDriver({ tabs: chrome.tabs, scripting: chrome.scripting });
+
+    let pendingWrites = Promise.resolve();
+
+    const result = await runReviewPass({
+      leads,
+      driver,
+      startAt,
+      signal: controller.signal,
+      onProgress: (p) => {
+        broadcast(MSG.REVIEW_PASS_PROGRESS, {
+          index: p.index, total: p.total, status: p.status,
+          name: p.lead?.name ?? null, completedLeads: p.completedLeads,
+        });
+      },
+    });
+
+    // Written in one batch at the end rather than per lead. Unlike enrichment, every
+    // patch here is tiny and the pass already holds them, so a mid-pass eviction
+    // costs the batch rather than the hour: the resume point is what protects the
+    // work, and it is returned either way.
+    pendingWrites = pendingWrites.then(() => (result.patches.length ? putLeads(result.patches) : null));
+    await pendingWrites;
+
+    if (result.stopReason === 'blocked' || result.stopReason === 'selector_drift') {
+      broadcast(MSG.RUN_BLOCKED, { stopReason: result.stopReason, problems: result.problems });
+    }
+
+    return {
+      stopReason: result.stopReason,
+      read: result.patches.length,
+      skipped: result.skipped,
+      completedLeads: result.completedLeads,
+      problems: result.problems,
+    };
+  } finally {
+    // The tab is ours, so it goes when we do, on every path out including a throw.
+    if (driver) await driver.close();
+    activeReviewPass = null;
+  }
+}
+
 const HANDLERS = {
   [MSG.CAPTURE_PB]: async (payload) => { await rememberPb(payload.pb); return { captured: true }; },
   [MSG.START_RUN]: (payload) => startRun(payload),
@@ -336,6 +411,12 @@ const HANDLERS = {
   [MSG.EXPORT]: (payload) => exportLeads(payload ?? {}),
   [MSG.CONFIRM_EXPORT]: (payload) => confirmExport(payload ?? {}),
   [MSG.ENRICH]: (payload) => runEnrich(payload ?? {}),
+  [MSG.REVIEW_PASS]: (payload) => runReviewPassJob(payload ?? {}),
+  [MSG.ABORT_REVIEW_PASS]: async () => {
+    if (!activeReviewPass) return { aborted: false };
+    activeReviewPass.controller.abort();
+    return { aborted: true };
+  },
   [MSG.ABORT_ENRICH]: async () => {
     if (!activeEnrich) return { aborted: false };
     activeEnrich.controller.abort();
