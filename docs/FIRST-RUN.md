@@ -22,6 +22,11 @@ than after sixty.
 
 ## 1. Load the extension
 
+Use **Comet**, on the **Usama** profile. Branded Google Chrome 137 and later ignores
+the command line switch that loads an unpacked extension, so the scripted route does
+not work there; Comet still honours it. Verified on 2026-07-31 against Comet
+150.0.7871.228.
+
 1. Open `chrome://extensions`
 2. Turn on **Developer mode**, top right
 3. Click **Load unpacked** and choose `~/Sites/gmaps-lead-scraper`
@@ -58,7 +63,15 @@ window.__mapProspectorPatched
 ```js
 window.fetch.name
 ```
-**Expected:** `"observedFetch"`. If it says `"fetch"`, the patch is not live. Stop.
+**Expected:** `"observedFetch"` in a clean browser.
+
+**In your normal Comet profile it will read something else, often an empty string, and
+that is fine.** Other extensions wrap `fetch` too, and whichever wraps last owns the
+name. Ours still sits in the chain and still captures. Measured in the Usama profile
+on 2026-07-31: the name was empty and capture worked.
+
+The check that actually matters is step 5 below: if `latestPb` holds a long string,
+the capture path works, whatever `fetch.name` says.
 
 5. Now open the **service worker** console: on the `chrome://extensions` card, click
    **service worker**. Run:

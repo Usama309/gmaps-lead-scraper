@@ -98,6 +98,26 @@ Two scoping properties carry as much weight as the allowlist, and both were veri
 the operator's Google account to every harvest request, which is the exact risk the control exists
 to prevent.
 
+## The account-cookie control, proven against a signed-in browser
+**Date:** 2026-07-31
+
+Everything before this was measured in a throwaway profile with no Google account, so
+the control was only ever shown not to break. It has now been exercised where it
+matters.
+
+Comet, the operator's own Usama profile, signed into Google with all ten account
+cookies present in the jar: LSID, HSID, SSID, APISID, SAPISID, SID,
+`__Secure-1PSID`, `__Secure-3PSID`, `__Secure-1PAPISID`, `__Secure-3PAPISID`.
+
+A 2 km harvest made 12 requests. Every one carried exactly `NID=...` and nothing
+else. Zero account cookies reached the wire. The session rule was gone when the run
+finished.
+
+That is the allowlist doing the job it was chosen for: the fetch contributes no
+cookie because `credentials: 'omit'` stands, and the rule writes back only names we
+listed, so the ten cookies sitting in the same jar could not travel even though the
+browser had them.
+
 ## Enforce the search radius on results, not on the request
 **Date:** 2026-07-30
 
