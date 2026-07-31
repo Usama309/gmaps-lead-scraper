@@ -31,8 +31,18 @@ test('a Facebook page in the website slot scores 38', () => {
   assert.ok(reasons.includes('Facebook page as website'));
 });
 
-test('a dead website scores 35', () => {
-  const { reasons } = scoreLead(base({ website: 'https://alshifa.pk/', websiteTech: 'dead' }));
+test('a dead website scores the dead-domain band and says so in its reasons', () => {
+  const { score, reasons } = scoreLead(base({ website: 'https://alshifa.pk/', websiteTech: 'dead' }));
+  // Read the band from SCORING rather than restating it as a literal: a test
+  // that hardcodes 35 stays green when the band is retuned, or when 'dead' is
+  // silently reclassified into a different band, as long as the OTHER literal
+  // parts of the sum still happen to add up. Summing the real bands this lead
+  // hits (viability 100 reviews, responsive mobile, non-appointment booking)
+  // means the assertion tracks the actual scoring config, not a snapshot of it.
+  const viabilityPoints = SCORING.viability.bands.find((b) => 100 >= b.min && 100 <= b.max).points;
+  const expected = SCORING.websiteGap.dead + viabilityPoints
+    + SCORING.mobileGap.responsive + SCORING.bookingGap.nonAppointment;
+  assert.equal(score, expected);
   assert.ok(reasons.includes('Website URL is dead'));
 });
 
@@ -146,6 +156,27 @@ test('a permanently closed business scores exactly zero and says why', () => {
   const { score, reasons } = scoreLead(base({ website: null, permanentlyClosed: true }));
   assert.equal(score, 0);
   assert.deepEqual(reasons, ['permanently closed']);
+});
+
+test('the mobile and booking components are worth their configured weight, and contribute only once enriched', () => {
+  // Same lead, differing only in enriched/mobileFriendly/hasBooking, so the
+  // score delta between the floor and the enriched version isolates exactly
+  // what those two components contributed. Weights come from SCORING, not a
+  // literal 40: if mobileGap or bookingGap contributed while still null (the
+  // Phase 1 defect this guards against), every unenriched lead would carry
+  // points nobody earned, and a hardcoded 40 would not notice a retuned weight.
+  const shared = {
+    cid: '0x9:0x9', name: 'Clinic', phone: '+92 300 000 0000',
+    reviewCount: 100, categories: ['Dentist'],
+    website: 'https://x.pk', websiteTech: 'wordpress',
+  };
+  const floor = scoreLead(makeLead({ ...shared, enriched: false })).score;
+  const real = scoreLead(makeLead({
+    ...shared, enriched: true, mobileFriendly: false, hasBooking: false,
+  })).score;
+
+  const expectedGain = SCORING.mobileGap.noViewport + SCORING.bookingGap.appointmentMissing;
+  assert.equal(real - floor, expectedGain);
 });
 
 test('an unenriched lead is marked provisional and skips enrichment-only components', () => {

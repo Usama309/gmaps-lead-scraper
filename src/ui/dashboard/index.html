@@ -315,6 +315,9 @@
     background: var(--ink); color: var(--ground); border: 1px solid var(--ink);
   }
   .mp-go:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .mp-go:disabled, .mp-go:disabled:hover {
+    background: var(--surface-2); border-color: var(--rule); color: var(--ink-3); cursor: not-allowed;
+  }
 
   .mp-toast {
     font-family: var(--data); font-size: 11.5px; color: var(--accent);
@@ -582,6 +585,30 @@
             <em id="f-dupe-hint">Hide the 0 businesses already exported in past runs</em>
           </span>
         </label>
+      </section>
+
+      <section class="mp-group">
+        <header>
+          <h2>Enrich</h2>
+          <span class="mp-cost rescrape">fetches sites</span>
+        </header>
+
+        <div class="mp-field">
+          <button type="button" class="mp-go" id="enrich-go">Enrich <span id="enrich-count">0</span> leads</button>
+          <p class="mp-hint">Fetches every website among the leads passing your filters right now,
+            so platform, mobile and booking fill in and the score above stops being a floor.</p>
+        </div>
+
+        <div class="mp-field" id="enrich-progress" hidden>
+          <div class="mp-prog-label">
+            <span>Enriching&hellip;</span>
+            <span><span id="enrich-done">0</span> of <span id="enrich-total">0</span></span>
+          </div>
+          <div class="mp-bar"><i id="enrich-bar" style="width:0%"></i></div>
+          <button type="button" class="mp-chip" id="enrich-stop">Stop</button>
+        </div>
+
+        <p class="mp-hint" id="enrich-result"></p>
       </section>
     </aside>
 

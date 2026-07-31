@@ -3,6 +3,12 @@ import { DEFAULT_FILTER_STATE } from '../../pipeline/filter.js';
 
 const state = { ...DEFAULT_FILTER_STATE, exportedKeys: null };
 
+// Whether an enrichment pass is currently in flight. Kept outside `state`
+// because it is UI-only bookkeeping, never sent to the worker: the worker
+// tracks its own concurrency slot (activeEnrich) independently, this only
+// drives which controls are enabled and visible.
+let enriching = false;
+
 const $ = (sel) => document.querySelector(sel);
 
 async function send(type, payload) {
@@ -93,6 +99,58 @@ function renderStats(leads, totalStored, hiddenAsDuplicates = 0) {
   $('#e-count').textContent = leads.length;
 }
 
+/**
+ * How many of the CURRENTLY DISPLAYED leads enrichment would actually fetch.
+ * Not `leads.length`: a lead with no real website, or only a Facebook page, has
+ * nothing to fetch. The button must say what will happen, not how many rows
+ * happen to be on screen, or the operator has no way to judge the cost of a
+ * click before making it. background.js's enrichLeads filters candidates the
+ * same way, so this figure and the run it starts always agree.
+ */
+function enrichCandidateCount(leads) {
+  return leads.filter((l) => l.hasRealWebsite && l.website).length;
+}
+
+function renderEnrichButton(leads) {
+  $('#enrich-count').textContent = enrichCandidateCount(leads);
+  $('#enrich-go').disabled = enriching;
+}
+
+/**
+ * Toggle every control tied to a run in flight. The worker refuses a second
+ * concurrent enrichment on its own (activeEnrich in background.js), but a
+ * disabled button says so up front instead of making the operator discover it
+ * through an error toast after clicking anyway.
+ */
+function setEnriching(running) {
+  enriching = running;
+  $('#enrich-go').disabled = running;
+  $('#enrich-progress').hidden = !running;
+  if (!running) {
+    $('#enrich-bar').style.width = '0%';
+    $('#enrich-done').textContent = '0';
+    $('#enrich-total').textContent = '0';
+  }
+}
+
+function updateEnrichProgress({ done, total }) {
+  $('#enrich-done').textContent = done;
+  $('#enrich-total').textContent = total;
+  $('#enrich-bar').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+}
+
+/**
+ * State the run's real outcome, from `stats`, never a guess: how many sites
+ * actually answered, how many domains are dead, how many could not be resolved
+ * either way. All three come straight off enrichLeads' own tally.
+ */
+function reportEnrichOutcome(stats) {
+  const parts = [`${stats.enriched} enriched`];
+  if (stats.dead) parts.push(`${stats.dead} dead domain${stats.dead === 1 ? '' : 's'}`);
+  if (stats.unresolved) parts.push(`${stats.unresolved} could not be resolved`);
+  $('#enrich-result').textContent = `${parts.join(', ')}.`;
+}
+
 function showError(message) {
   const toast = $('#e-toast');
   toast.textContent = message;
@@ -125,6 +183,7 @@ async function refresh() {
     renderRows(leads);
     renderStats(leads, totalStored, hiddenAsDuplicates);
     renderExportedCount(exportedCount);
+    renderEnrichButton(leads);
   } catch (error) {
     // Clear the table as well as showing the message. Leaving the previous rows
     // and counts under an error toast lets the operator read stale numbers as
@@ -133,6 +192,7 @@ async function refresh() {
       '<tr><td colspan="11" style="padding:26px;text-align:center;color:var(--ink-3)">'
       + 'Could not reach the extension. The counts below are cleared rather than left stale.</td></tr>';
     renderStats([], 0);
+    renderEnrichButton([]);
     showError(error.message);
   }
 }
@@ -208,10 +268,40 @@ function bind() {
       showError(error.message);
     }
   });
+
+  // Enrichment runs over the currently filtered set: `state` is the same
+  // filter object refresh() already sends to GET_LEADS, so ENRICH fetches
+  // exactly the leads on screen, never the whole store.
+  $('#enrich-go').addEventListener('click', async () => {
+    if (enriching) return;
+    clearError();
+    $('#enrich-result').textContent = '';
+    setEnriching(true);
+    try {
+      const { stats } = await send(MSG.ENRICH, state);
+      reportEnrichOutcome(stats);
+      // Re-fetch so the new scores, platforms and provisional flags the run
+      // just wrote to the store actually appear in the table.
+      await refresh();
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      setEnriching(false);
+    }
+  });
+
+  $('#enrich-stop').addEventListener('click', async () => {
+    try {
+      await send(MSG.ABORT_ENRICH, {});
+    } catch (error) {
+      showError(error.message);
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === MSG.RUN_PROGRESS) refresh();
+  if (message?.type === MSG.ENRICH_PROGRESS) updateEnrichProgress(message.payload);
 });
 
 bind();

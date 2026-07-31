@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { scanHtml, enrichOne, enrichLeads } from '../src/pipeline/enrich.js';
 import { makeLead, mergeLead } from '../src/core/schema.js';
+import { scoreLead } from '../src/pipeline/score.js';
 
 /**
  * A page with enough markup to clear CONFIG.enrich.minUsefulHtmlBytes, so the
@@ -457,4 +458,81 @@ test('a real dead domain, merged, DOES record the scoring signal', () => {
     assert.equal(merged.websiteTech, 'dead');
     assert.equal(merged.enriched, true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7: proving the score actually moves once a lead is enriched, not just
+// that a field or a reason string changed. Every test here is driven through
+// enrichOne + mergeLead + scoreLead, the real pipeline, rather than a
+// hand-built patch object: a fixture the test builds itself only proves the
+// consumer (scoreLead) is self-consistent, and leaves the producer
+// (enrichOne/scanHtml/mergeLead) free to change underneath it.
+// ---------------------------------------------------------------------------
+
+test('enriching a WordPress site with no booking widget clears provisional and changes the score', async () => {
+  const stored = makeLead({
+    cid: '0xf1:0xf1', name: 'Attock Dental', phone: '+92 300 000 0000',
+    reviewCount: 100, categories: ['Dentist'], website: 'https://wp-dentist.pk',
+  });
+  const floor = scoreLead(stored);
+  assert.equal(floor.provisional, true, 'an unenriched lead must start provisional, or this test proves nothing');
+
+  // WordPress, real content, no booking-widget script of any kind: the
+  // platform is identifiable and the absence of booking is a real finding,
+  // not an unread page.
+  const html = buildPage(
+    '<meta name="generator" content="WordPress 6.4"><p>Call us to book an appointment.</p>',
+  );
+  const patch = await enrichOne({ lead: stored, fetchPage: async () => ({ status: 200, body: html }) });
+  const merged = mergeLead(stored, { ...stored, ...patch });
+  const real = scoreLead(merged);
+
+  assert.equal(real.provisional, false, 'a real enrichment result must clear provisional');
+  assert.notEqual(real.score, floor.score,
+    'a WordPress site with no booking widget must score differently once enriched than it did as a floor');
+});
+
+test('a lead whose enrichment failed for an unexplained reason stays provisional', async () => {
+  const stored = makeLead({
+    cid: '0xf2:0xf2', name: 'Flaky Clinic', phone: '+92 300 000 0000',
+    reviewCount: 100, website: 'https://flaky-clinic.pk',
+  });
+  assert.equal(scoreLead(stored).provisional, true);
+
+  const patch = await enrichOne({
+    lead: stored,
+    fetchPage: async () => { throw new Error('something unrelated broke'); },
+  });
+  const merged = mergeLead(stored, { ...stored, ...patch });
+
+  assert.equal(scoreLead(merged).provisional, true,
+    'an unexplained failure must not be mistaken for a completed enrichment');
+});
+
+test('a page too thin to judge leaves the lead provisional, but its detected platform still contributes', async () => {
+  const stored = makeLead({
+    cid: '0xf3:0xf3', name: 'Shopify Studio', phone: '+92 300 000 0000',
+    reviewCount: 100, categories: ['Hardware store'], website: 'https://thin-shopify.pk',
+  });
+  const floor = scoreLead(stored);
+
+  // A client-rendered shell, deliberately under CONFIG.enrich.minUsefulHtmlBytes,
+  // the same shape as the fixture at the top of this file: enough for
+  // detectTech to name-drop the platform off the script src, not enough for
+  // an absent booking widget to mean anything.
+  const thinShell = '<!doctype html><html><head></head><body>'
+    + '<div id="root"></div><script src="https://cdn.shopify.com/s/files/x.js"></script></body></html>';
+
+  const patch = await enrichOne({ lead: stored, fetchPage: async () => ({ status: 200, body: thinShell }) });
+  assert.equal(patch.enriched, false, 'the fixture must actually be too thin, or this test proves nothing');
+
+  const merged = mergeLead(stored, { ...stored, ...patch });
+  const real = scoreLead(merged);
+
+  assert.equal(real.provisional, true,
+    'a page too thin to judge mobile or booking must not be scored as though it were enriched');
+  assert.equal(merged.websiteTech, 'shopify',
+    'the platform is readable even in a shell too small to trust for other signals');
+  assert.notEqual(real.score, floor.score,
+    'the detected platform must move the score even while the lead stays provisional');
 });

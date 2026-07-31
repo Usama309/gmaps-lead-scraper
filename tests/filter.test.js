@@ -239,7 +239,14 @@ test('the dashboard UI carries no hardcoded counts left over from the mockup', (
   // <dd|em|span> while listing `e-count` in its own pattern, and `e-count` is a <b>.
   // A `length >= 5` assertion then masked the miss: seven slots matched, e-count was
   // never among them, and setting it to 18 kept the suite green.
-  const EXPECTED = ['s-harv', 's-pass', 's-hot', 's-med', 's-nosite', 's-dupe', 'f-dupe-hint', 'e-count'];
+  const EXPECTED = [
+    's-harv', 's-pass', 's-hot', 's-med', 's-nosite', 's-dupe', 'f-dupe-hint', 'e-count',
+    // Phase 2: the enrichment control. enrich-count is the candidate figure the
+    // button states before a click; enrich-done/enrich-total are the progress
+    // line ENRICH_PROGRESS drives while a run is in flight. All three must ship
+    // at 0, the same reason as every slot above them.
+    'enrich-count', 'enrich-done', 'enrich-total',
+  ];
   const lying = [];
   for (const id of EXPECTED) {
     // Match the WHOLE element, not just its first text node. The previous version
