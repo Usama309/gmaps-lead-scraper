@@ -517,3 +517,20 @@ test('swapCeiling is pinned to the rating ceiling, in both directions', () => {
   assert.equal(ratingRule.valid(CANARY_RULES.swapCeiling + 0.1), false,
     'anything above the ceiling must fail the rating range check, which is what makes a swap visible');
 });
+
+test('the ambiguity warning is gated at the SMALL-page threshold, not the coverage one', () => {
+  // Swapping this gate from 2 to 5 left the whole suite green while reintroducing
+  // the four-record blind spot the file had already closed once for total field
+  // loss. The gate is load-bearing, so it gets an assertion rather than a comment.
+  const four = structuredClone(GOOD);
+  four[64] = four[64].slice(0, 4);
+  four[64].forEach((entry, i) => {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = [5, 4, 3, 5][i];
+    r[4][8] = [1, 2, 3, 4][i];
+  });
+  const result = runCanary(four, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(result.ok, true, 'still must not halt');
+  assert.ok(result.warnings.some((w) => /cannot be told apart/i.test(w)),
+    'a four-record page must still be reported as unreadable, not silently accepted');
+});

@@ -145,3 +145,17 @@ export function filterLeads(leads, state) {
     return 0;
   });
 }
+
+/**
+ * How many leads the Skip duplicates toggle ALONE is hiding.
+ *
+ * Not "how many stored leads are exported". `skipExported` is applied last, after
+ * every other predicate, so counting exported leads directly included ones already
+ * removed by score or rating, and the readout showed two numbers that could not be
+ * reconciled with each other.
+ */
+export function countHiddenByExportSkip(leads, state) {
+  if (!state?.skipExported || !state?.exportedKeys) return 0;
+  return filterLeads(leads, { ...state, skipExported: false }).length
+    - filterLeads(leads, state).length;
+}

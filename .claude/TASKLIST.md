@@ -31,4 +31,6 @@ awaits the live-run verification in Step 7 before Phase 1 can be called done end
 - [x] Task 14 Step 7: live end-to-end verification in Chrome (completed 2026-07-30)
 - [x] Fix the four defects the live run exposed (completed 2026-07-30)
 - [x] Re-review the live-run fixes adversarially (completed 2026-07-30; 6 blockers found and fixed)
-- [ ] Second adversarial review of the review-round fixes, then merge
+- [x] Second adversarial review (completed 2026-07-30; 5 blockers found and fixed)
+- [x] Third scoped re-review (completed 2026-07-31; 3 blockers + 5 important, all fixed)
+- [ ] Phase 2: website enrichment, per docs/superpowers/plans/2026-07-30-phase2-website-enrichment.md

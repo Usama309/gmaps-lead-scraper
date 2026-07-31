@@ -128,10 +128,19 @@ export const googlePayloadSource = {
     // Deliberately called as `return finish` with a string literal at every site.
     // The test that scans this file can only see literals anchored on a return, so
     // passing a variable would compile fine and silently escape that check.
+    // `notices` stays a SEPARATE field. Merging it into `problems` was a real
+    // regression: `runHarvest` returns `completed_with_errors` whenever problems is
+    // non-empty, and FIRST-RUN.md defines that reason as "at least one query failed
+    // and the lead list is incomplete". A thin market warns on every leg, so every
+    // rural run was labelled errored and incomplete when it was neither, which
+    // destroys the only completion signal the operator has. It also buried the halt
+    // reason: a 60-leg run blocked at leg 31 produced a 9,212 character PAUSED line
+    // with "HTTP 429" as the last twelve characters.
     const finish = (stopReason, problems = []) => ({
       leads,
       stopReason: assertStopReason(stopReason),
-      problems: [...notices, ...problems],
+      problems,
+      notices,
     });
 
     while (offset < CONFIG.harvest.perQueryCap) {

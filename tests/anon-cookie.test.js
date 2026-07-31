@@ -120,23 +120,14 @@ test('the URL the harvester actually builds carries the marker', () => {
     'the request must carry the marker the cookie rule matches on');
 });
 
-test('the DNR rule pattern matches the URL the harvester builds', () => {
-  // Chrome's urlFilter grammar treats only *, |, || and ^ as constructs; ? is a
-  // literal. Translating the pattern faithfully is the only way to check the two
-  // halves agree without a browser.
-  const url = buildSearchUrl({ query: 'dentist in Attock', pb: '!1sx!8i0' });
-  const filter = buildRule('NID=x').condition.urlFilter;
-
-  assert.ok(filter.startsWith('||'), 'expected a host-anchored pattern');
-  const [literalPrefix, ...rest] = filter.slice(2).split('*');
-  assert.ok(url.href.includes(literalPrefix),
-    `pattern prefix ${literalPrefix} is absent from ${url.href}`);
-  let cursor = url.href.indexOf(literalPrefix) + literalPrefix.length;
-  for (const chunk of rest) {
-    const found = url.href.indexOf(chunk, cursor);
-    assert.notEqual(found, -1, `pattern chunk ${chunk} is absent from ${url.href}`);
-    cursor = found + chunk.length;
-  }
+test('the rule pattern is exactly the one Chrome needs, asserted literally', () => {
+  // An earlier version re-implemented Chrome's urlFilter matcher by splitting on `*`
+  // and checking substrings. That approximation accepted `||oogle.com/search?*mpsrc=1`
+  // and `||w.google.com/search?*mpsrc=1`, which Chrome rejects because `||` anchors at
+  // a domain-label boundary, and it rejected an uppercase marker, which Chrome accepts
+  // because urlFilter is case-insensitive by default. It proved nothing its sibling
+  // did not already catch. A literal is honest about what is being pinned.
+  assert.equal(buildRule('NID=x').condition.urlFilter, '||www.google.com/search?*mpsrc=1');
 });
 
 test('the endpoint has one source of truth, shared by the request and the rule', () => {
@@ -200,4 +191,12 @@ test('the allowlist itself contains no account cookie', () => {
   for (const name of CONFIG.anonCookie.allow) {
     assert.ok(!ACCOUNT_COOKIE_NAMES.includes(name), `${name} is an account cookie and must not be allowlisted`);
   }
+});
+
+test('the endpoint can be varied, and the rule follows it', () => {
+  // buildRule took a config parameter while reading the endpoint from the global, so
+  // the one value that decides where the cookie travels was the only thing a test
+  // could not vary.
+  const rule = buildRule('NID=x', CONFIG.anonCookie, 'https://example.test/find');
+  assert.equal(rule.condition.urlFilter, '||example.test/find?*mpsrc=1');
 });

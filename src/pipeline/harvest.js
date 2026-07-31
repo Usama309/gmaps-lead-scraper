@@ -31,6 +31,9 @@ function assertLegResult(result, leg) {
   if (!Array.isArray(result.leads)) {
     throw new Error(`leg ${leg.id} returned leads as ${typeof result.leads}, expected an array`);
   }
+  if (result.notices !== undefined && !Array.isArray(result.notices)) {
+    throw new Error(`leg ${leg.id} returned notices as ${typeof result.notices}, expected an array`);
+  }
   assertStopReason(result.stopReason);
 }
 
@@ -142,6 +145,11 @@ export async function runHarvest({
   const byKey = new Map();
   const problems = [];
   let completedLegs = startAt;
+  // Things a leg could not confirm, as distinct from things that went wrong. A Set
+  // because the same observation repeats on every leg of a thin run, and sixty
+  // identical paragraphs is how a warning becomes invisible.
+  const notices = new Set();
+
   // Counted by BUSINESS, not by record. Legs overlap by design, so the same
   // out-of-area business is returned by many of them; counting records made the
   // figure roughly leg count times the truth, and made it incomparable with the
@@ -158,6 +166,7 @@ export async function runHarvest({
     stopReason: assertStopReason(stopReason),
     completedLegs,
     problems,
+    notices: [...notices],
     outsideArea: outsideKeys.size,
   });
 
@@ -206,6 +215,11 @@ export async function runHarvest({
       problems.push(...result.problems.map((p) => `leg ${leg.id}: ${p}`));
     }
 
+    // Deliberately NOT pushed into `problems`. A notice must not change the run's
+    // stop reason, and must not be joined into the PAUSED line where the halt
+    // reason has to stay readable.
+    for (const notice of result.notices ?? []) notices.add(notice);
+
     // Only the newly seen leads. Legs overlap by design, so passing the raw list
     // would make a streaming consumer write the same business several times.
     if (fresh.length > 0) onLeads(fresh);
@@ -240,8 +254,7 @@ export async function runHarvest({
     if (i + 1 < legs.length) await delay(nextDelayMs());
   }
 
-  // A run where legs failed is not a completed run, even though it reached the
-  // end of the queue. Reporting plain success while listing problems underneath
-  // invites the operator to read a degraded harvest as a full one.
+  // Keyed on problems ONLY. A notice is an observation, not a failure, and folding
+  // one in here reported a flawless rural harvest as incomplete.
   return finish(problems.length > 0 ? 'completed_with_errors' : 'completed');
 }

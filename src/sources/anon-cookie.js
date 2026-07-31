@@ -83,8 +83,12 @@ export function markerParam(config = CONFIG.anonCookie) {
 }
 
 /** The declarativeNetRequest rule that writes that header onto our own requests. */
-export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
+export function buildRule(cookieHeader, config = CONFIG.anonCookie, searchUrl = CONFIG.googleSearchUrl) {
   const { name, value } = markerParam(config);
+  // Injected rather than reached for, so a test can pin the pattern against a config
+  // it controls. Reading the global while accepting a config parameter meant the
+  // endpoint was the one thing that could not be varied.
+  const endpoint = new URL(searchUrl);
   return {
     id: config.ruleId,
     priority: 1,
@@ -99,7 +103,7 @@ export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
       // Host, path AND our own marker. The marker is what makes this precise: it is
       // written by exactly one line of code in this extension, so no request built by
       // anyone else can match, whatever context it comes from.
-      urlFilter: `||${new URL(CONFIG.googleSearchUrl).host}${new URL(CONFIG.googleSearchUrl).pathname}?*${name}=${value}`,
+      urlFilter: `||${endpoint.host}${endpoint.pathname}?*${name}=${value}`,
       resourceTypes: [...config.resourceTypes],
       tabIds: [config.workerOnlyTabId],
     },

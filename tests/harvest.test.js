@@ -514,3 +514,85 @@ test('out-of-area results are counted once per business, not once per leg', asyn
   assert.equal(result.leads.length, 0);
   assert.equal(result.outsideArea, 1, 'one business seen by eight legs is one business');
 });
+
+/** A leg that succeeded but had one observation the canary could not confirm. */
+function noticingSource(notice, stopReason = 'end_of_list') {
+  return {
+    id: 'fake',
+    harvestLeg: async () => ({
+      leads: [{ lat: 33.7609824, lng: 72.342874, key: 'k1', name: 'Attock Clinic' }],
+      stopReason, problems: [], notices: [notice],
+    }),
+  };
+}
+
+const NOTICE_CENTRE = { lat: 33.7609824, lng: 72.342874 };
+const legAt = (i) => ({ id: `l${i}`, query: 'dentist', keyword: 'dentist', tileIndex: i, ...NOTICE_CENTRE, zoom: 14 });
+
+test('a leg that only raised a notice still completes the run cleanly', async () => {
+  // The regression this guards: notices were merged into problems, and runHarvest
+  // returns completed_with_errors whenever problems is non-empty. FIRST-RUN.md
+  // defines that as "at least one query failed, the list is incomplete". A thin
+  // market warns on every leg, so every rural run claimed to be incomplete when it
+  // was flawless, which destroys the only completion signal the operator has.
+  const result = await runHarvest({
+    legs: [legAt(0)], pb: 'pb', source: noticingSource('ratings and reviews cannot be told apart'),
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'completed', `notices must not degrade the status: ${result.problems.join('; ')}`);
+  assert.deepEqual(result.problems, [], 'a notice is not a problem');
+});
+
+test('notices still reach the caller, on their own channel', async () => {
+  const result = await runHarvest({
+    legs: [legAt(0)], pb: 'pb', source: noticingSource('something unconfirmable'),
+    delay: async () => {},
+  });
+  assert.deepEqual(result.notices, ['something unconfirmable']);
+});
+
+test('one observation repeated across sixty legs is reported once', async () => {
+  // Sixty identical paragraphs is how a warning becomes invisible, and it is what
+  // turned a PAUSED line into 9,212 characters with the halt reason at the end.
+  const legs = Array.from({ length: 60 }, (_, i) => legAt(i));
+  const result = await runHarvest({
+    legs, pb: 'pb', source: noticingSource('the same observation every time'),
+    delay: async () => {},
+  });
+  assert.equal(result.notices.length, 1);
+});
+
+test('a real problem still degrades the run, so the distinction is not just suppression', async () => {
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({ leads: [], stopReason: 'network_error', problems: ['request failed'], notices: [] }),
+  };
+  const result = await runHarvest({ legs: [legAt(0)], pb: 'pb', source, delay: async () => {} });
+  assert.equal(result.stopReason, 'completed_with_errors');
+  assert.ok(result.problems.some((p) => /request failed/.test(p)));
+});
+
+test('a halt reason is not buried behind notices', async () => {
+  // Measured pre-fix: a 60-leg thin run blocked at leg 31 produced
+  // "PAUSED: blocked. <9,212 characters>" with "HTTP 429" as the last twelve.
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({
+      leads: [], stopReason: 'blocked', problems: ['HTTP 429'],
+      notices: ['a long unconfirmable observation '.repeat(10)],
+    }),
+  };
+  const result = await runHarvest({ legs: [legAt(0)], pb: 'pb', source, delay: async () => {} });
+  assert.equal(result.stopReason, 'blocked');
+  assert.equal(result.problems.length, 1, 'the halt reason must stand alone');
+  assert.ok(result.problems[0].includes('HTTP 429'));
+});
+
+test('a leg returning a malformed notices field is rejected, not silently accepted', async () => {
+  const source = {
+    id: 'fake',
+    harvestLeg: async () => ({ leads: [], stopReason: 'end_of_list', problems: [], notices: 'oops' }),
+  };
+  const result = await runHarvest({ legs: [legAt(0)], pb: 'pb', source, delay: async () => {} });
+  assert.equal(result.stopReason, 'leg_threw');
+});

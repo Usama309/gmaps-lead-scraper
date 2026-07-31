@@ -1,7 +1,7 @@
 import { MSG, makeResponse } from './src/core/messages.js';
 import { planLegs, runHarvest } from './src/pipeline/harvest.js';
 import { googlePayloadSource } from './src/sources/google-payload.js';
-import { filterLeads } from './src/pipeline/filter.js';
+import { filterLeads, countHiddenByExportSkip } from './src/pipeline/filter.js';
 import { toCsv } from './src/export/csv.js';
 import { putLeads, getAllLeads, getExportedKeys, markExported, saveRun } from './src/store/db.js';
 import { installAnonCookieRule, removeAnonCookieRule } from './src/sources/anon-cookie.js';
@@ -140,6 +140,10 @@ async function startRun(config) {
       broadcast(MSG.RUN_BLOCKED, { stopReason: result.stopReason, problems: result.problems });
     }
 
+    // Observations the canary could not confirm. Deduplicated upstream, so this is
+    // one line per distinct observation rather than one per leg.
+    for (const notice of result.notices ?? []) broadcast(MSG.RUN_NOTICE, { message: notice });
+
     // Google widens a search that runs out of local results, so this number is
     // routinely large and its size is information: it says the requested radius is
     // thinner than the keyword can fill.
@@ -155,6 +159,7 @@ async function startRun(config) {
       total: result.leads.length,
       completedLegs: result.completedLegs,
       problems: result.problems,
+      notices: result.notices,
       outsideArea: result.outsideArea,
       coverage,
     };
@@ -191,12 +196,8 @@ removeAnonCookieRule(chrome).catch((error) => {
 
 async function getLeads(filterState) {
   const [leads, exportedKeys] = await Promise.all([getAllLeads(), getExportedKeys()]);
-  const filtered = filterLeads(leads, { ...filterState, exportedKeys });
-  // Counted as "how many MORE would show if only this toggle flipped", not "how many
-  // stored leads happen to be exported". skipExported is applied last, after every
-  // other predicate, so the naive count included leads already excluded by score or
-  // rating and the two figures on the readout could not be reconciled.
-  const withoutSkip = filterLeads(leads, { ...filterState, exportedKeys, skipExported: false });
+  const state = { ...filterState, exportedKeys };
+  const filtered = filterLeads(leads, state);
   return {
     leads: filtered,
     totalStored: leads.length,
@@ -205,7 +206,7 @@ async function getLeads(filterState) {
     // businesses had been exported and 6 duplicates hidden no matter what had
     // actually happened.
     exportedCount: exportedKeys?.size ?? 0,
-    hiddenAsDuplicates: Math.max(0, withoutSkip.length - filtered.length),
+    hiddenAsDuplicates: countHiddenByExportSkip(leads, state),
   };
 }
 

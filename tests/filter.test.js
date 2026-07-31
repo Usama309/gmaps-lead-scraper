@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { makeLead } from '../src/core/schema.js';
-import { filterLeads, DEFAULT_FILTER_STATE } from '../src/pipeline/filter.js';
+import { filterLeads, DEFAULT_FILTER_STATE, countHiddenByExportSkip } from '../src/pipeline/filter.js';
 
 let n = 0;
 function lead(overrides = {}) {
@@ -242,13 +242,19 @@ test('the dashboard UI carries no hardcoded counts left over from the mockup', (
   const EXPECTED = ['s-harv', 's-pass', 's-hot', 's-med', 's-nosite', 's-dupe', 'f-dupe-hint', 'e-count'];
   const lying = [];
   for (const id of EXPECTED) {
-    const m = html.match(new RegExp(`<[a-z]+[^>]*\\bid="${id}"[^>]*>([^<]*)<`));
+    // Match the WHOLE element, not just its first text node. The previous version
+    // stopped at the first `<`, so a number sitting after a nested tag was invisible:
+    // `<dd id="s-nosite"><small>of pass </small>12</dd>` passed cleanly, and
+    // `#s-nosite` really does contain a nested <small> in this file.
+    const open = new RegExp(`<([a-z]+)[^>]*\\bid="${id}"[^>]*>`);
+    const m = html.match(open);
     assert.ok(m, `runtime slot ${id} was not found at all, so this test cannot see it`);
-    // Any literal digit is suspect: every one of these is written by dashboard.js at
-    // runtime, so the markup placeholder must be 0. Allowing 1 through let a
-    // hardcoded "1" ship.
-    const digits = m[1].match(/\d+/g) ?? [];
-    if (digits.some((n) => Number(n) !== 0)) lying.push({ id, text: m[1].trim() });
+    const from = m.index + m[0].length;
+    const to = html.indexOf(`</${m[1]}>`, from);
+    assert.notEqual(to, -1, `runtime slot ${id} is not closed`);
+    const inner = html.slice(from, to).replace(/<[^>]*>/g, ' ');
+    const digits = inner.match(/\d+/g) ?? [];
+    if (digits.some((n) => Number(n) !== 0)) lying.push({ id, text: inner.trim() });
   }
   assert.deepEqual(lying, [], `runtime slots ship hardcoded values: ${JSON.stringify(lying)}`);
 
@@ -260,4 +266,36 @@ test('the dashboard UI carries no hardcoded counts left over from the mockup', (
   // The enrichment progress bar described a Phase 2 that does not exist.
   assert.ok(!body.includes('domains resolved'), 'the mockup enrichment bar is still present');
   assert.ok(!body.includes('Harvest leg'), 'the mockup run-state counter is still present');
+});
+
+test('the duplicates count reports what the toggle alone hides', () => {
+  // The naive version counted every stored lead that had been exported, including
+  // ones already removed by score or rating, so "Duplicates hidden" and "Passing
+  // filters" could not be reconciled: turning the toggle off raised the second by
+  // far less than the first claimed.
+  const exportedLowScore = lead({ website: 'https://modern.pk', websiteTech: 'next' }); // scores low
+  const exportedHighScore = lead({ website: null });                                    // scores high
+  const fresh = lead({ website: null });
+  const leads = [exportedLowScore, exportedHighScore, fresh];
+
+  const state = {
+    ...DEFAULT_FILTER_STATE,
+    minScore: 50,
+    skipExported: true,
+    exportedKeys: new Set([exportedLowScore.key, exportedHighScore.key]),
+  };
+
+  const shown = filterLeads(leads, state).length;
+  const hidden = countHiddenByExportSkip(leads, state);
+  const shownWithToggleOff = filterLeads(leads, { ...state, skipExported: false }).length;
+
+  assert.equal(hidden, shownWithToggleOff - shown,
+    'the figure must equal how many more rows appear when the toggle is released');
+  assert.equal(hidden, 1, 'only the high-scoring exported lead was hidden by this toggle');
+});
+
+test('the duplicates count is zero when the toggle is off or nothing was exported', () => {
+  const leads = [lead(), lead()];
+  assert.equal(countHiddenByExportSkip(leads, { ...DEFAULT_FILTER_STATE, skipExported: false }), 0);
+  assert.equal(countHiddenByExportSkip(leads, { ...DEFAULT_FILTER_STATE, exportedKeys: null }), 0);
 });

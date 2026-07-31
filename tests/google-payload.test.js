@@ -300,3 +300,69 @@ function payloadWith(count) {
   const p = []; p[64] = records;
   return p;
 }
+
+/** Same page, but every rating whole and every count tiny: the unreadable case. */
+function ambiguousPayload(count) {
+  const p = payloadWith(count);
+  p[64].forEach((entry, i) => {
+    const r = entry[1];
+    r[4][7] = [5, 4, 3][i % 3];
+    r[4][8] = [1, 2, 3, 4][i % 4];
+  });
+  return p;
+}
+
+test('a page the canary cannot read yields a NOTICE, and the leg still succeeds', async () => {
+  // This is the wiring, end to end, through the real source. Tests that injected a
+  // fake source could not see it: deleting the line that collects canary warnings,
+  // or dropping `notices` from the leg result, both left the whole suite green while
+  // the observation silently stopped reaching the operator.
+  let call = 0;
+  const pages = [
+    { status: 200, body: ")]}'\n" + JSON.stringify(ambiguousPayload(8)) },
+    { status: 200, body: ")]}'\n" + JSON.stringify({ 64: [] }) },
+  ];
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => pages[Math.min(call++, pages.length - 1)],
+    delay: async () => {},
+  });
+
+  assert.equal(result.stopReason, 'end_of_list', 'an unreadable page must not stop the leg');
+  assert.equal(result.problems.length, 0, 'a notice is not a problem');
+  assert.ok(result.notices.some((n) => /cannot be told apart/i.test(n)),
+    `expected the ambiguity notice, got ${JSON.stringify(result.notices)}`);
+  assert.ok(result.leads.length > 0, 'the leads are still harvested');
+});
+
+test('a readable page produces no notices at all', async () => {
+  // Guards the other direction: a notice that fires on ordinary data is noise, and
+  // noise on every run is how the real one gets ignored.
+  let call = 0;
+  const pages = [
+    { status: 200, body: ")]}'\n" + JSON.stringify(payloadWith(8)) },
+    { status: 200, body: ")]}'\n" + JSON.stringify({ 64: [] }) },
+  ];
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => pages[Math.min(call++, pages.length - 1)],
+    delay: async () => {},
+  });
+  assert.deepEqual(result.notices, []);
+});
+
+test('every leg exit carries the notices it gathered, including a blocked one', async () => {
+  // `finish` is called from a dozen sites. A notice gathered on page one must not be
+  // lost because the leg later hit a block.
+  let call = 0;
+  const result = await googlePayloadSource.harvestLeg({
+    query: 'dentist', pb: PB, lat: 33.7609824, lng: 72.342874,
+    fetchPage: async () => (call++ === 0
+      ? { status: 200, body: ")]}'\n" + JSON.stringify(ambiguousPayload(8)) }
+      : { status: 429, body: '' }),
+    delay: async () => {},
+  });
+  assert.equal(result.stopReason, 'blocked');
+  assert.ok(result.notices.some((n) => /cannot be told apart/i.test(n)),
+    'a notice must survive an exit that happens later in the leg');
+});

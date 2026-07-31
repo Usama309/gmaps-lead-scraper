@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Fixed
+- [2026-07-31 01:30 AM] Third review, three blockers, all from one root cause I introduced: canary
+  notices were merged into `problems`. `completed_with_errors` keys off that array, and FIRST-RUN.md
+  defines it as "at least one query failed, the list is incomplete", so every thin-market run was
+  labelled errored and incomplete when it was flawless. It also buried the halt reason: a 60-leg run
+  blocked at leg 31 produced a 9,212 character PAUSED line with "HTTP 429" as the last twelve
+  characters. Notices now travel on their own field end to end, deduplicated
+- [2026-07-31 01:30 AM] The entire notice path had no test: deleting either half left all 292 green.
+  Now exercised through the real source, and both deletions bite
+- [2026-07-31 01:30 AM] The markup guard only read a slot's first text node, so a number after a
+  nested tag was invisible. `#s-nosite` already has that exact shape
+- [2026-07-31 01:30 AM] The DNR test re-implemented Chrome's urlFilter matcher and got it wrong in
+  both directions; replaced with the literal pattern. `buildRule` read the endpoint from the global
+  while accepting a config parameter, so the one value that decides where the cookie travels could
+  not be varied
+- [2026-07-31 01:30 AM] The duplicates count is now a pure tested function; the ambiguity gate is
+  pinned by a test rather than defended by a comment
 - [2026-07-31 12:30 AM] Second adversarial review found five blockers, all fixed. The worst was mine:
   the ambiguity check I added to the canary raised a PROBLEM, and `canary_failed` halts the whole
   job, so a single six-record outer tile of a rural run aborted a sixty-leg harvest. Ambiguity is now
