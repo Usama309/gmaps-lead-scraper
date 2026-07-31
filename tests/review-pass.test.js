@@ -60,15 +60,52 @@ test('a lead is read through tab, sort menu, newest, then read, in that order', 
   ]);
 });
 
-test('IF SORTING FAILS, NO DATE IS RECORDED AT ALL', async () => {
+test('IF SORTING FAILS ON A PANEL THAT HAS REVIEWS, NO DATE IS RECORDED', async () => {
   // The tempting alternative is to read the most-relevant row anyway and store its
   // date. That is worse than storing nothing: the operator filters on recency, and a
   // wrong number is indistinguishable from a right one.
-  const driver = fakeDriver({ failStep: 'sortNewest' });
+  const driver = fakeDriver({
+    failStep: 'sortNewest',
+    panel: { ownerReplies: false, lastReviewDays: 400, precise: false, reviewsSeen: 6 },
+  });
   const result = await run([lead(1)], driver);
   assert.equal(result.patches.length, 0, 'nothing may be stored from an unsorted list');
-  assert.ok(result.problems.some((p) => /sort/i.test(p)));
-  assert.ok(!driver.steps.includes('read'), 'and it must not even read');
+  assert.ok(result.problems.some((p) => /sorted/i.test(p)));
+});
+
+test('the tab and sort are attempted even when an earlier click fails', async () => {
+  // Nothing is judged until after the read, so a failed tab click must not short
+  // circuit the read that decides whether this business has reviews at all.
+  const driver = fakeDriver({ failStep: 'reviewsTab', panel: { ownerReplies: false, lastReviewDays: null, precise: false, reviewsSeen: 0 } });
+  await run([lead(1)], driver);
+  assert.ok(driver.steps.includes('read'), 'the read must still happen');
+});
+
+test('A BUSINESS WITH NO REVIEWS IS A SUCCESSFUL READ, whichever step it fails at', async () => {
+  // Measured live, twice. First 6 of 19 leads failed at the sort click, then 11 of 15
+  // failed one step earlier at the Reviews tab, because a business with no reviews has
+  // no tab to open either. Fixing only the step I had seen left the other one broken,
+  // which is why nothing is judged until after the read now.
+  //
+  // It was wrong twice over: the read is perfectly good, and a failure leaves no read
+  // timestamp, so every future pass retried the same shop forever.
+  const noReviews = { ownerReplies: false, lastReviewDays: null, precise: false, reviewsSeen: 0 };
+  for (const failStep of ['reviewsTab', 'sortMenu', 'sortNewest']) {
+    const result = await run([lead(1)], fakeDriver({ failStep, panel: noReviews }));
+    assert.equal(result.patches.length, 1, `failing at ${failStep} must still be a read`);
+    assert.equal(result.patches[0].ownerReplies, false, 'nobody replied because nobody reviewed');
+    assert.equal(result.patches[0].lastReviewDays, null);
+    assert.ok(result.patches[0].reviewsReadAt, 'and it gets a timestamp, so it is never retried');
+    assert.deepEqual(result.failedLeads, [], `failing at ${failStep} must not be recorded as failed`);
+  }
+});
+
+test('a business WITH reviews whose tab will not open is still a failure', async () => {
+  // The other direction, so the fix above cannot be satisfied by accepting everything.
+  const hasReviews = { ownerReplies: false, lastReviewDays: 400, precise: false, reviewsSeen: 6 };
+  const result = await run([lead(1)], fakeDriver({ failStep: 'reviewsTab', panel: hasReviews }));
+  assert.equal(result.patches.length, 0);
+  assert.deepEqual(result.failedLeads, ['k1']);
 });
 
 test('a successful read produces a patch carrying when it was read', async () => {
@@ -102,14 +139,27 @@ test('SELECTOR DRIFT STOPS THE WHOLE PASS TOO', async () => {
   assert.ok(result.problems.some((p) => /drift/i.test(p)));
 });
 
-test('a failed lead does not advance the resume point', async () => {
-  // Mirrors runHarvest exactly. Advancing past a failure means a resume skips it
-  // permanently, which in the harvester silently lost a slice of the market and here
-  // would silently lose a business the operator is about to call.
+test('A FAILURE DOES NOT PIN THE RESUME POINT, or the pass can never get past it', async () => {
+  // Copied from runHarvest at first, and a live run showed why that was wrong within
+  // ninety seconds: one unreadable lead at index 0 pinned the point at 0, so a stop
+  // after nine successful reads reported "stopped at 0". Resuming would re-read those
+  // nine, hit the same bad lead and pin again, forever.
+  //
+  // Nothing is lost by advancing. A failed lead never gets a reviewsReadAt, so the
+  // next pass retries exactly the failures and skips everything that worked. The
+  // retry and the skip are the same mechanism.
   const driver = fakeDriver({ failStep: 'reviewsTab' });
   const result = await run([lead(1), lead(2), lead(3)], driver);
-  assert.equal(result.completedLeads, 0, 'the first failure is the resume point');
+  assert.equal(result.completedLeads, 3, 'the counter must advance past a failure');
+  assert.deepEqual(result.failedLeads, ['k1', 'k2', 'k3'], 'and name what was missed');
   assert.equal(result.stopReason, 'completed_with_errors');
+});
+
+test('a failed lead is retried by the next pass, because it has no read timestamp', async () => {
+  // The mechanism that makes advancing safe. A lead that failed carries no
+  // reviewsReadAt, so freshness does not skip it next time.
+  const failed = lead(1);
+  assert.equal(isFresh(failed, NOW), false, 'a lead that was never read is never fresh');
 });
 
 test('a clean pass advances the resume point to the end', async () => {

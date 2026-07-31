@@ -389,6 +389,7 @@ async function runReviewPassJob(payload) {
       stopReason: result.stopReason,
       read: result.patches.length,
       skipped: result.skipped,
+      failedLeads: result.failedLeads,
       completedLeads: result.completedLeads,
       problems: result.problems,
     };

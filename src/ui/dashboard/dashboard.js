@@ -233,6 +233,11 @@ function updateReviewProgress({ index, total, name, status }) {
 function reportReviewOutcome(out) {
   const parts = [`${out.read} read`];
   if (out.skipped) parts.push(`${out.skipped} already fresh`);
+  // Named, not just counted. A failed lead is retried by the next pass automatically,
+  // because it never got a read timestamp, so this is information rather than a chore.
+  if (out.failedLeads?.length) {
+    parts.push(`${out.failedLeads.length} could not be read, and the next pass will retry them`);
+  }
 
   if (out.stopReason === 'blocked') {
     parts.push('STOPPED: Google served an interstitial. Leave it a while before resuming.');

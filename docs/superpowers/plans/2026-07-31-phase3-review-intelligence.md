@@ -108,12 +108,12 @@ The markup test in `tests/filter.test.js` forbids hardcoded numbers in runtime s
 
 Not optional. Phase 1 skipped its live step and it cost four defects; Phase 2's live step immediately found two more, including one that made two whole verticals return zero.
 
-- [ ] Run the pass over a harvested set in Comet on the Usama profile.
-- [ ] Record: leads read, owner replies found, dormant businesses found, wall clock, and whether any block was hit.
-- [ ] Confirm on a business that DOES have owner replies that `.CDe7pd` resolves. The recon business had none, so that selector is the one still unverified.
-- [ ] Confirm a business with no reviews reports `null`, not `0` days and `false` replies.
-- [ ] Kill the pass midway, restart it, and confirm it resumes rather than starting over.
-- [ ] Record the real numbers in `.claude/PROJECT_SCOPE.md`.
+- [x] Run the pass over a harvested set in Comet on the Usama profile.
+- [x] Record: leads read, owner replies found, dormant businesses found, wall clock, and whether any block was hit.
+- [x] Confirm on a business that DOES have owner replies that `.CDe7pd` resolves. The recon business had none, so that selector is the one still unverified.
+- [x] Confirm a business with no reviews reports `null`, not `0` days and `false` replies.
+- [x] Kill the pass midway, restart it, and confirm it resumes rather than starting over.
+- [x] Record the real numbers in `.claude/PROJECT_SCOPE.md`.
 
 ## Global Constraints
 

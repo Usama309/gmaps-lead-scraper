@@ -31,6 +31,14 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 08:30 AM] The review pass recorded every business with NO reviews as a failure, because
+  such a business has no Reviews tab and no sort control to click. Live failure rate 11 of 15. Worse,
+  a failure leaves no read timestamp, so every later pass retried the same shop forever and it could
+  never succeed. Nothing is judged until after the read now: 0 of 12 failed on the re-run
+- [2026-07-31 08:30 AM] A failed lead pinned the resume point at its own index, copied from the
+  harvester where legs are few and repeats are free. Live, one bad lead at index 0 meant a stop after
+  nine good reads reported "stopped at 0" and resuming would loop forever. The counter advances, and
+  freshness does the retry: a failed lead has no timestamp, so the next pass reads exactly it
 - [2026-07-31 06:15 AM] A review-pass patch was dropped whole at the schema boundary, because
   `ownerReplies` and `lastReviewDays` only merged when `enriched` was true and a review patch is not
   an enrichment. Same class as the Phase 2 platform defect, found this time by checking the boundary

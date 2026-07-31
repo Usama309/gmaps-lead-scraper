@@ -93,28 +93,54 @@ async function readOneLead(lead, driver) {
   const opened = await driver.open(url);
   if (opened?.blocked) return { status: 'blocked', reason: opened.reason ?? 'blocked' };
 
-  if (!await driver.click('reviewsTab')) {
-    return { status: 'failed', reason: 'the reviews tab did not open' };
-  }
-
-  const sorted = await driver.click('sortMenu') && await driver.click('sortNewest');
-  if (!sorted) {
-    return { status: 'failed', reason: 'could not sort by newest, so any date read would be the most relevant review rather than the latest' };
-  }
+  // Every step is ATTEMPTED, and nothing is judged until after the read. An earlier
+  // version returned as soon as a click failed, which meant a business with no
+  // reviews, and therefore no Reviews tab to open, was recorded as a failure. Because
+  // a failure leaves no read timestamp, the next pass retried it forever and it could
+  // never succeed. Measured live: 11 of 15 leads failing on "the reviews tab did not
+  // open", all of them small shops with nothing to show.
+  const tabOpened = await driver.click('reviewsTab');
+  const sorted = tabOpened
+    && await driver.click('sortMenu')
+    && await driver.click('sortNewest');
 
   // Drift throws, and must not be caught here: it means every remaining lead would
   // report nulls, so the caller has to stop rather than grind through the queue.
   const panel = await driver.read();
+
+  // The panel decides, not the clicks. `reviewsSeen: 0` is a real observation, and
+  // interpretPanel has already turned it into ownerReplies: false with null recency.
+  if (panel.reviewsSeen === 0) return { status: 'read', panel };
+
+  // There ARE reviews and we could not sort them, so the newest is unknown. Storing
+  // the most-relevant row's date would be a confidently wrong number, and recency is
+  // exactly what the operator filters on.
+  if (!sorted) {
+    return { status: 'failed', reason: 'the panel has reviews but could not be sorted by newest, so no date can be trusted' };
+  }
+
   return { status: 'read', panel };
 }
 
 /**
  * Run the pass.
  *
- * Mirrors `runHarvest`'s resume contract deliberately, including the rule that a
- * FAILED lead does not advance the counter. Advancing past a failure means a resume
- * skips it permanently, which in the harvester silently lost a slice of the market
- * and here would silently lose a business the operator is about to call.
+ * ## Why this does NOT copy runHarvest's resume rule
+ *
+ * The harvester pins its resume point at the first failed leg, so a resume retries it
+ * rather than skipping it. Copying that here was wrong, and a live run showed why
+ * within ninety seconds: one unreadable lead at index 0 pinned the point at 0, so a
+ * stop after nine successful reads reported "stopped at 0". Pressing resume would
+ * re-read those nine, hit the same bad lead, and pin again. The operator could never
+ * get past it.
+ *
+ * That rule works for the harvester because legs are few and deduplication makes a
+ * repeat free. Here a repeat costs a real page load each, and there are hundreds.
+ *
+ * So the counter advances monotonically, and nothing is lost, because FRESHNESS
+ * already does the retry: a failed lead never gets a `reviewsReadAt`, so the next
+ * pass re-reads exactly the failures and skips everything that succeeded. The retry
+ * is the same mechanism as the skip, which is why there is no second one.
  */
 export async function runReviewPass({
   leads,
@@ -138,14 +164,17 @@ export async function runReviewPass({
   const patches = [];
   const problems = [];
   let completedLeads = startAt;
-  let firstFailed = null;
   let skipped = 0;
+  // Returned so the operator learns which businesses were not read, rather than
+  // inferring it from a count that does not add up.
+  const failedLeads = [];
 
   const finish = (reason) => ({
     patches,
     stopReason: assertPassReason(reason),
     completedLeads,
     skipped,
+    failedLeads,
     problems,
   });
 
@@ -158,7 +187,7 @@ export async function runReviewPass({
     // done: there is nothing to retry on a resume.
     if (isFresh(lead, now())) {
       skipped += 1;
-      completedLeads = firstFailed ?? (i + 1);
+      completedLeads = i + 1;
       onProgress({ index: i, total: leads.length, lead, status: 'fresh', completedLeads });
       continue;
     }
@@ -190,10 +219,12 @@ export async function runReviewPass({
       });
     } else {
       problems.push(`${lead.name ?? lead.key}: ${outcome.reason}`);
-      if (outcome.status === 'failed' && firstFailed === null) firstFailed = i;
+      if (outcome.status === 'failed') failedLeads.push(lead.key);
     }
 
-    completedLeads = firstFailed ?? (i + 1);
+    // Advances even past a failure. See the note above: the failed lead has no
+    // reviewsReadAt, so the next pass retries it and skips everything that worked.
+    completedLeads = i + 1;
     onProgress({ index: i, total: leads.length, lead, status: outcome.status, completedLeads });
 
     if (signal?.aborted) return finish('aborted');

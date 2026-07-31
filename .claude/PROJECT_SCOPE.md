@@ -56,8 +56,19 @@ Verified in Comet on the operator's own Usama profile, signed into Google:
 Google account cookies. A harvest made 12 requests, every one carrying exactly `NID`
 and nothing else. Zero account cookies reached the wire.
 
-Still to do in Phase 2: `ownerReplies` and `lastReviewDays` remain null, since review
-intelligence is Phase 3.
+**Phase 3, review intelligence: complete and live-verified on 2026-07-31.** 412 tests.
+
+Measured in Comet on the Usama profile, reading real Maps place panels:
+- 34 leads read, ZERO nulls: every read produced a definite answer
+- 5 businesses have owner replies, which confirms the `.CDe7pd` selector in production
+  rather than only in a hand check
+- 12 dormant more than a year, 1 reviewed the previous day, 5 with no reviews at all
+- the reviewless businesses are recorded as "nobody replied because nobody reviewed",
+  not as failures, which is what stopped them being retried forever
+- about 9 seconds a lead, against the 13 the estimate quotes, so the warning the
+  button shows is conservative
+- stop and resume verified live: a stopped pass reports where to resume, a resumed
+  pass skips what was already read and retries only what failed
 
 ## Next Priorities
 1. Run Task 14 Step 7 (live end-to-end verification) and record the results here
