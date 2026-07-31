@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- [2026-07-31 05:30 AM] Phase 3 Tasks 1 and 2: `src/sources/review-dates.js` parses Google's relative
+  review dates, and `src/sources/google-dom.js` reads owner replies and recency off the rendered
+  place panel. Both pure and testable in bare Node
 - [2026-07-31 04:30 AM] Enrichment control on the dashboard: candidate count, live progress, stop,
   and a real outcome line. Phase 2 Tasks 6 to 8 complete
 - [2026-07-31 03:15 AM] Enrichment wiring: `ENRICH` / `ENRICH_PROGRESS` / `ABORT_ENRICH`, a separate
