@@ -2,6 +2,7 @@ import { CONFIG } from '../core/config.js';
 import {
   detectTech, detectChatbot, detectBooking, detectSocials, detectMobileFriendly,
 } from '../core/fingerprints.js';
+import { nextDelayMs } from './guard.js';
 
 /**
  * Addresses that match a naive email regex but are not a way to reach the
@@ -255,8 +256,23 @@ export async function enrichOne({ lead, fetchPage = defaultFetchPage }) {
  * Sequential and abortable: `signal` is checked between leads (not mid-fetch,
  * since enrichOne owns its own per-request timeout), and whatever has already
  * been enriched when the signal fires is returned rather than discarded.
+ *
+ * `delay` and the cache (`getCached`/`putCached`) are injected, exactly like
+ * `runHarvest`'s `delay`. This module must stay importable in bare Node: a real
+ * timer would make every test slow, and a real cache read/write would pull in
+ * IndexedDB, which does not exist outside a browser.
  */
-export async function enrichLeads({ leads, fetchPage, now = Date.now, signal = null, onProgress = () => {} }) {
+export async function enrichLeads({
+  leads, fetchPage, now = Date.now, signal = null, onProgress = () => {},
+  // Same default as runHarvest: a real timer when nothing is injected, so
+  // production wiring gets a working throttle for free.
+  delay = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // No-op cache by default. enrich.js cannot import src/store/db.js: that would
+  // pull IndexedDB into a module that must run in bare Node, and it is exactly
+  // the browser-API boundary the injected params exist to hold open.
+  getCached = async () => null,
+  putCached = async () => {},
+}) {
   const candidates = leads.filter((lead) => lead.hasRealWebsite && lead.website);
 
   const patches = [];
@@ -269,10 +285,44 @@ export async function enrichLeads({ leads, fetchPage, now = Date.now, signal = n
     startedAt: new Date(now()).toISOString(),
   };
 
+  // Cache for THIS run, separate from the persistent one. Two leads on the same
+  // domain can both appear in one batch (a chain, or one agency landing page
+  // reused across listings), and the persistent write for the first is awaited
+  // but still lands strictly after its patch is computed: a second lead on the
+  // same domain, checked before that write settles, would still read a miss
+  // from getCached and pay for a second fetch. Checking this map first closes
+  // that window regardless of how fast the persistent cache actually is.
+  const seenThisRun = new Map();
+
+  // Tracks whether a REAL fetch has happened yet, not whether a lead has been
+  // processed. A cache hit (this map or the persistent one) costs no request
+  // and must not consume or advance the throttle: there is no server on the
+  // other end to be polite to. The very first genuine fetch of the run is also
+  // never delayed, matching runHarvest, which only waits BETWEEN legs.
+  let fetchedAnySite = false;
+
   for (const lead of candidates) {
     if (signal?.aborted) break;
 
-    const patch = await enrichOne({ lead, fetchPage });
+    const domain = lead.domain;
+    let patch = domain ? seenThisRun.get(domain) : undefined;
+
+    if (patch === undefined && domain) {
+      patch = (await getCached(domain)) ?? undefined;
+    }
+
+    if (patch === undefined) {
+      if (fetchedAnySite) await delay(nextDelayMs());
+      fetchedAnySite = true;
+
+      patch = await enrichOne({ lead, fetchPage });
+
+      if (domain) {
+        seenThisRun.set(domain, patch);
+        await putCached(domain, patch);
+      }
+    }
+
     patches.push({ key: lead.key, ...patch });
 
     if (patch.websiteTech === 'dead') stats.dead += 1;

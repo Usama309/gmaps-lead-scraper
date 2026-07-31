@@ -20,6 +20,18 @@ export const MSG = Object.freeze({
   // Kept separate from RUN_COVERAGE because that payload has a fixed shape and the
   // panel's renderer silently ignores anything that does not match it.
   RUN_NOTICE: 'mapprospector/run-notice',
+
+  // Phase 2: enrichment runs over the currently filtered set, not the whole
+  // store. Kept as its own message rather than reusing START_RUN because it
+  // carries a filter state, not a harvest config, and the two run under
+  // separate concurrency slots in background.js.
+  ENRICH: 'mapprospector/enrich',
+  ENRICH_PROGRESS: 'mapprospector/enrich-progress',
+  // A dedicated abort, not a reuse of ABORT_RUN. Harvest and enrichment are
+  // independent operations with independent slots (activeRun vs activeEnrich);
+  // one name for both would either abort the wrong one or have to guess which
+  // slot the operator meant.
+  ABORT_ENRICH: 'mapprospector/abort-enrich',
 });
 
 const KNOWN = new Set(Object.values(MSG));

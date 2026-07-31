@@ -1,13 +1,24 @@
 import { MSG, makeResponse } from './src/core/messages.js';
 import { planLegs, runHarvest } from './src/pipeline/harvest.js';
+import { enrichLeads } from './src/pipeline/enrich.js';
 import { googlePayloadSource } from './src/sources/google-payload.js';
 import { filterLeads, countHiddenByExportSkip } from './src/pipeline/filter.js';
 import { toCsv } from './src/export/csv.js';
-import { putLeads, getAllLeads, getExportedKeys, markExported, saveRun } from './src/store/db.js';
+import {
+  putLeads, getAllLeads, getExportedKeys, markExported, saveRun,
+  getDomainCache, putDomainCache,
+} from './src/store/db.js';
 import { installAnonCookieRule, removeAnonCookieRule } from './src/sources/anon-cookie.js';
 
 /** Live run state. One run at a time by design: concurrent runs would race the dedupe pool. */
 let activeRun = null;
+/**
+ * Live enrichment state. Its own slot, separate from activeRun: a harvest and
+ * an enrichment pass are different operations with different lifetimes, and
+ * conflating their concurrency under one flag would let one refuse to start
+ * because the other is running, or let one abort call stop the wrong thing.
+ */
+let activeEnrich = null;
 let latestPb = null;
 
 /**
@@ -239,6 +250,80 @@ async function confirmExport(payload) {
   return { confirmed: keys.length };
 }
 
+/**
+ * Enrich the leads the operator is currently looking at.
+ *
+ * The slot is claimed SYNCHRONOUSLY, before the first await, for the same
+ * reason as startRun: a check and a claim separated by an await is a real
+ * time-of-check to time-of-use window, and two fast clicks would both pass
+ * `if (activeEnrich)` while the first was still suspended, running two
+ * enrichment passes that double-fetch the same domains and race the same
+ * merge-on-write store.
+ */
+async function runEnrich(filterState) {
+  if (activeEnrich) throw new Error('an enrichment is already in progress');
+
+  const controller = new AbortController();
+  activeEnrich = { controller };
+
+  try {
+    // Resolved through getLeads, not getAllLeads. Enrichment must run over the
+    // filtered set the operator is looking at, never the whole store: measured
+    // live, only 7 of 42 harvested leads even had a website, so enriching
+    // everything stored would spend most of the run's fetches on leads nobody
+    // asked to see.
+    const { leads } = await getLeads(filterState);
+
+    // Serialises every store write for this pass, so they land in order and
+    // can be drained before the run reports done. Same reasoning as startRun:
+    // overlapping writes against a merge-on-write store can interleave, and an
+    // un-awaited write is simply lost if the worker is evicted mid-flight.
+    let pendingWrites = Promise.resolve();
+
+    const result = await enrichLeads({
+      leads,
+      signal: controller.signal,
+      getCached: getDomainCache,
+      putCached: putDomainCache,
+      // Broadcast AND write per lead, not only once at the end. One fetch per
+      // candidate, throttled between them, can run for minutes, and a single
+      // awaited response is lost if the panel closes or the worker is evicted
+      // before the batch finishes.
+      onProgress: (p) => {
+        broadcast(MSG.ENRICH_PROGRESS, { lead: p.lead, patch: p.patch, done: p.done, total: p.total });
+        pendingWrites = pendingWrites
+          .then(() => putLeads([{
+            key: p.lead.key,
+            // enrichLeads only ever enriches a lead that already has a real
+            // website, but the patch itself does not carry that fact, only
+            // whatever scanHtml/enrichOne observed. mergeLead only accepts an
+            // incoming websiteTech when incoming.hasRealWebsite is true, so
+            // without this line the detected platform (or 'dead', a 35-point
+            // scoring signal) would merge to nothing while email and the rest
+            // of the same patch landed fine.
+            hasRealWebsite: true,
+            ...p.patch,
+          }]))
+          .then((res) => {
+            if (res.failed?.length) {
+              console.error(`${res.failed.length} enrichment patches could not be stored`, res.failed);
+            }
+          })
+          .catch((error) => console.error('storing an enrichment patch failed', error));
+      },
+    });
+
+    await pendingWrites;
+
+    return { stats: result.stats, enrichedCount: result.patches.length };
+  } finally {
+    // Every path out, including a thrown error, releases the slot. Otherwise a
+    // failed enrichment permanently wedges the worker into refusing every
+    // later attempt.
+    activeEnrich = null;
+  }
+}
+
 const HANDLERS = {
   [MSG.CAPTURE_PB]: async (payload) => { await rememberPb(payload.pb); return { captured: true }; },
   [MSG.START_RUN]: (payload) => startRun(payload),
@@ -250,6 +335,12 @@ const HANDLERS = {
   [MSG.GET_LEADS]: (payload) => getLeads(payload ?? {}),
   [MSG.EXPORT]: (payload) => exportLeads(payload ?? {}),
   [MSG.CONFIRM_EXPORT]: (payload) => confirmExport(payload ?? {}),
+  [MSG.ENRICH]: (payload) => runEnrich(payload ?? {}),
+  [MSG.ABORT_ENRICH]: async () => {
+    if (!activeEnrich) return { aborted: false };
+    activeEnrich.controller.abort();
+    return { aborted: true };
+  },
 };
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {

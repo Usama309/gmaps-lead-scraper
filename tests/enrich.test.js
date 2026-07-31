@@ -201,6 +201,9 @@ test('enrichLeads tallies dead, enriched and unresolved outcomes separately', as
 
   const { stats } = await enrichLeads({
     leads: [ok, dead, flaky],
+    // Three distinct domains means two real throttle gaps. Without this, the
+    // test would wait on the real 1.2 to 2.8 second default delay twice.
+    delay: async () => {},
     fetchPage: async ({ url }) => {
       if (url === 'https://ok.pk') return { status: 200, body: REAL_PAGE_FIXTURE };
       if (url === 'https://dead.pk') throw Object.assign(new Error('x'), { name: 'TypeError' });
@@ -231,4 +234,188 @@ test('enrichLeads stops at an aborted signal and keeps what it already enriched'
 
   assert.equal(calls, 1, 'the abort must be observed before the second lead starts');
   assert.equal(patches.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// enrichLeads, Task 5: the throttle and the domain cache.
+// ---------------------------------------------------------------------------
+
+test('two leads sharing a domain cost one fetch', async () => {
+  // A chain, or one agency landing page reused across listings. Different
+  // paths on the same host must still normalise to one domain.
+  const a = lead({ website: 'https://shared.pk/location-a' });
+  const b = lead({ website: 'https://shared.pk/location-b' });
+
+  let calls = 0;
+  const { patches, stats } = await enrichLeads({
+    leads: [a, b],
+    delay: async () => {},
+    fetchPage: async () => { calls += 1; return { status: 200, body: REAL_PAGE_FIXTURE }; },
+  });
+
+  assert.equal(calls, 1, 'the second lead must reuse the first fetch, not repeat it');
+  assert.equal(patches.length, 2, 'each lead still gets its own patch entry');
+  assert.deepEqual(patches.map((p) => p.key), [a.key, b.key]);
+  assert.equal(patches[0].websiteTech, patches[1].websiteTech, 'both share the one result fetched');
+  assert.equal(stats.enriched, 2, 'both leads count as outcomes even though only one was fetched');
+});
+
+test('a persistent cache hit costs no fetch and no delay', async () => {
+  const fresh = lead({ website: 'https://fresh.pk' });
+  const cachedLead = lead({ website: 'https://cached.pk' });
+  const cachedPatch = {
+    enriched: true, websiteTech: 'shopify', mobileFriendly: true,
+    hasBooking: false, hasChatbot: false, email: 'shop@cached.pk', socials: [],
+  };
+
+  let fetchCalls = 0;
+  let delayCalls = 0;
+  const { patches } = await enrichLeads({
+    leads: [fresh, cachedLead],
+    delay: async () => { delayCalls += 1; },
+    getCached: async (domain) => (domain === 'cached.pk' ? cachedPatch : null),
+    fetchPage: async () => { fetchCalls += 1; return { status: 200, body: REAL_PAGE_FIXTURE }; },
+  });
+
+  assert.equal(fetchCalls, 1, 'only the uncached lead is fetched');
+  assert.equal(delayCalls, 0, 'a cache hit has no server to be polite to, so it must never throttle');
+  assert.equal(patches[1].websiteTech, 'shopify', 'the cached patch is used as-is');
+});
+
+test('the throttle fires between fetches, not before the first or after the last', async () => {
+  const a = lead({ website: 'https://a1.pk' });
+  const b = lead({ website: 'https://b1.pk' });
+  const c = lead({ website: 'https://c1.pk' });
+
+  let fetchCalls = 0;
+  let delayCalls = 0;
+  const { patches } = await enrichLeads({
+    leads: [a, b, c],
+    delay: async (ms) => {
+      delayCalls += 1;
+      assert.ok(Number.isFinite(ms) && ms > 0, 'must receive a real figure from nextDelayMs, not a stray unit');
+    },
+    fetchPage: async () => { fetchCalls += 1; return { status: 200, body: REAL_PAGE_FIXTURE }; },
+  });
+
+  assert.equal(fetchCalls, 3);
+  assert.equal(patches.length, 3);
+  assert.equal(delayCalls, 2, 'three fetches need exactly two gaps between them');
+});
+
+test('progress fires once per lead, in order, not once at the end', async () => {
+  const a = lead({ website: 'https://prog-a.pk' });
+  const b = lead({ website: 'https://prog-b.pk' });
+
+  const seen = [];
+  await enrichLeads({
+    leads: [a, b],
+    delay: async () => {},
+    fetchPage: async () => ({ status: 200, body: REAL_PAGE_FIXTURE }),
+    onProgress: (p) => seen.push(p.done),
+  });
+
+  assert.deepEqual(seen, [1, 2], 'a long batch must report progress as it goes, not only once at the end');
+});
+
+test('an abort keeps the patches already produced, and never starts the next fetch', async () => {
+  const a = lead({ website: 'https://abort-a.pk' });
+  const b = lead({ website: 'https://abort-b.pk' });
+  const c = lead({ website: 'https://abort-c.pk' });
+  const controller = new AbortController();
+
+  let calls = 0;
+  const { patches, stats } = await enrichLeads({
+    leads: [a, b, c],
+    signal: controller.signal,
+    delay: async () => {},
+    fetchPage: async () => {
+      calls += 1;
+      if (calls === 2) controller.abort();
+      return { status: 200, body: REAL_PAGE_FIXTURE };
+    },
+  });
+
+  assert.equal(calls, 2, 'the third lead must never be fetched once the signal is aborted');
+  assert.equal(patches.length, 2, 'the two leads already enriched must survive in the result');
+  assert.deepEqual(patches.map((p) => p.key), [a.key, b.key]);
+  assert.equal(stats.candidates, 3, 'stats.candidates reports the whole intended batch, not just what finished');
+});
+
+// ---------------------------------------------------------------------------
+// background.js, Task 5: the ENRICH wiring.
+//
+// background.js calls chrome.runtime.onMessage.addListener and
+// chrome.sidePanel.setPanelBehavior at module load, so importing it in bare
+// Node throws before a single test could run. These read the source text
+// instead, the same pattern tests/messages.test.js already uses for the
+// content scripts, which have the same problem.
+// ---------------------------------------------------------------------------
+
+/** Slice out one top-level function's source by balancing braces from its first `{`. */
+function extractFunction(source, signature) {
+  const start = source.indexOf(signature);
+  if (start === -1) return null;
+  const braceStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+test('a second concurrent enrichment is refused, and the slot is claimed before the first await', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  const body = extractFunction(source, 'async function runEnrich');
+  assert.ok(body, 'background.js must define runEnrich');
+
+  assert.match(body, /if \(activeEnrich\) throw/, 'a concurrent call must be refused, not silently queued');
+
+  const checkIndex = body.search(/if \(activeEnrich\) throw/);
+  const claimIndex = body.search(/activeEnrich = \{/);
+  const firstAwaitIndex = body.search(/\bawait\b/);
+  assert.ok(checkIndex >= 0 && checkIndex < firstAwaitIndex,
+    'the refusal check must run before the first await, or two fast calls both pass it');
+  assert.ok(claimIndex >= 0 && claimIndex < firstAwaitIndex,
+    'the slot must be claimed before the first await too, for the same reason');
+});
+
+test('the enrichment slot is released in a finally, so a thrown error cannot wedge it shut', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  const body = extractFunction(source, 'async function runEnrich');
+  const finallyIndex = body.search(/\bfinally\s*\{/);
+  assert.ok(finallyIndex >= 0, 'runEnrich must have a finally block');
+  assert.match(body.slice(finallyIndex), /activeEnrich = null/, 'the finally block must clear the slot');
+});
+
+test('runEnrich resolves leads through getLeads, not the whole store', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  const body = extractFunction(source, 'async function runEnrich');
+  assert.match(body, /getLeads\(/, 'must resolve the filter state through getLeads, which applies filterLeads');
+  assert.doesNotMatch(body, /getAllLeads\(/, 'must not read every stored lead directly, bypassing the filter');
+});
+
+test('ENRICH_PROGRESS is broadcast from inside onProgress, not only in the final response', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  const body = extractFunction(source, 'async function runEnrich');
+  const onProgressIndex = body.search(/onProgress:\s*\(/);
+  assert.ok(onProgressIndex >= 0, 'runEnrich must pass onProgress to enrichLeads');
+  const nextCommaIndex = body.indexOf('},', onProgressIndex);
+  const onProgressBody = body.slice(onProgressIndex, nextCommaIndex);
+  assert.match(onProgressBody, /broadcast\(MSG\.ENRICH_PROGRESS/,
+    'progress must be broadcast per lead, from inside the callback that fires per lead');
+});
+
+test('ABORT_ENRICH stops activeEnrich, independently of ABORT_RUN', async () => {
+  const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  const abortEnrichIndex = source.indexOf('[MSG.ABORT_ENRICH]');
+  assert.ok(abortEnrichIndex >= 0, 'background.js must handle ABORT_ENRICH');
+  const body = source.slice(abortEnrichIndex, source.indexOf('},', abortEnrichIndex) + 2);
+  assert.match(body, /activeEnrich\.controller\.abort\(\)/);
+  assert.doesNotMatch(body, /activeRun\.controller\.abort\(\)/,
+    'ABORT_ENRICH must stop the enrichment controller, not the harvest one');
 });
