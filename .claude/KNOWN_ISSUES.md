@@ -24,8 +24,14 @@
   weeks is approximate. Not fixable from our side.
 - Mobile friendliness is a heuristic from a single HTML fetch rather than a PageSpeed verdict, and is
   labelled as such in the UI. A deep check on a shortlist is a Phase 2 candidate.
-- `.keys/extension.pem` pins the extension ID and is gitignored, so it is not backed up anywhere.
-  Losing it changes the ID and breaks the Phase 4 Sheets OAuth client. Copy it somewhere safe.
+- The signing key now lives at `~/.config/mapprospector-keys/extension.pem`, OUTSIDE the extension
+  folder. It used to sit in `.keys/` inside it, which meant `--load-extension` shipped the private
+  key to the browser and Chrome warned about it on every load. It is still not backed up anywhere:
+  losing it changes the extension ID and breaks the Phase 4 Sheets OAuth client.
+- The category typeahead and the location-mode toggle are live controls that do not feed the filter
+  state. They were dead entirely until 2026-07-31, when the inline script holding them was extracted
+  to `rail.js`; now they run, but selecting a category still does not narrow the table. Either wire
+  them into `state` or remove the controls.
 
 - Google review dates are relative text only, so last-review precision beyond roughly
   four weeks is approximate. Documented in the spec, not fixable.

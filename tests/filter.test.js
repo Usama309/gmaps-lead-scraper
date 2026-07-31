@@ -306,3 +306,15 @@ test('the duplicates count is zero when the toggle is off or nothing was exporte
   assert.equal(countHiddenByExportSkip(leads, { ...DEFAULT_FILTER_STATE, skipExported: false }), 0);
   assert.equal(countHiddenByExportSkip(leads, { ...DEFAULT_FILTER_STATE, exportedKeys: null }), 0);
 });
+
+test('the dashboard page contains no inline script, which an extension page forbids', () => {
+  // An MV3 extension page runs under script-src 'self', so an inline <script> is
+  // blocked outright. A 140-line block sat in this page doing nothing but throwing a
+  // CSP error on every load, leaving the category typeahead and the location-mode
+  // toggle as dead controls that looked live. Found in the extension's own runtime
+  // errors during a live run, not by any test, which is why there is now a test.
+  const html = readFileSync(new URL('../src/ui/dashboard/index.html', import.meta.url), 'utf8');
+  const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>/gi)];
+  assert.deepEqual(inline.map((m) => m[0]), [],
+    'inline script is silently blocked in an extension page; move it to a file');
+});
