@@ -17,6 +17,44 @@
 - Never write an em dash in user-facing copy.
 - **Three-state null semantics are binding.** `null` means never inspected, `false` means inspected and absent. Enrichment sets `enriched: true` and must then write `false` rather than leaving `null`, or a "no chatbot" filter silently includes sites nobody looked at.
 
+## Recon, measured 2026-07-30 against the real harvested domains
+
+Six real prospect sites from the Attock run, fetched from the live service worker with
+`credentials: 'omit'`:
+
+| Site | Result | Time | Size | Tech detected |
+|---|---|---|---|---|
+| attockdental.site | 200 | 4.0s | 19 KB | unknown, `mailto:` found |
+| khandentalcare.com | 200 | 3.5s | 277 KB | wordpress |
+| sabkadentist.pk | 200 | 10.5s | 302 KB | wordpress |
+| mutahirhospital.com | dead, TypeError | 0.3s | - | dead |
+| smilecraftbysohail.bolt.host | 200 | 4.0s | **1 KB** | unknown |
+| qazidentalhospital.com | 200 | 4.0s | 97 KB | wordpress |
+
+What this settles:
+- **Worker fetches work.** No CORS problem, as the spec predicted. Now verified rather than assumed.
+- **A dead domain is real and common.** One in six here, near the spec's 12% figure.
+- **Fetches are slow: 3.5 to 10.5 seconds.** The 12 second timeout is correctly sized, but this is
+  the pacing constraint for the whole phase, not the throttle.
+- **Only 7 of 42 leads had a website at all, and one of those was a Facebook page.** Enrichment runs
+  on roughly one lead in seven. That is the stage ordering paying off.
+
+### The 1 KB shell, and why it needs its own outcome
+
+`smilecraftbysohail.bolt.host` returned HTTP 200 and one kilobyte of markup: a JavaScript-rendered
+single page app whose real content never appears in the raw HTML. We fetched it successfully and
+learned nothing.
+
+Reporting that as `hasChatbot: false, hasBooking: false` would be a confident false negative, and it
+breaks the three-state rule in spirit: the field says "inspected and absent" when the truth is
+"inspected, blind". A site that renders client-side is exactly the kind of modern build that DOES
+tend to carry a booking widget, so this fails in the expensive direction.
+
+**Task 3 must therefore classify a third outcome.** When a 200 response carries too little markup to
+read, below `CONFIG.enrich.minUsefulHtmlBytes`, set `websiteTech` to the detected value or `unknown`,
+leave the boolean signals `null`, and leave `enriched: false`, so the lead stays provisional and the
+operator is not told a fact nobody established.
+
 ## Why the worker scans HTML as text rather than parsing it
 
 Verified in the live worker on 2026-07-30: `DOMParser` is `undefined`, `document` is `undefined`, and `chrome.offscreen` is unavailable without declaring the permission. The alternative was an offscreen document purely to get a DOM.
@@ -194,6 +232,7 @@ Split deliberately. `scanHtml` is pure and carries all the logic, so it is exhau
 | 200 with HTML | detected value | `true` |
 | DNS failure, connection refused, timeout | `dead` | `true` |
 | 4xx or 5xx | `dead` | `true` |
+| 200 but under `minUsefulHtmlBytes` of markup | detected or `unknown` | `false` |
 | Fetch threw for any other reason | unchanged (`null`) | `false` |
 
 The last row matters: an unexplained failure must NOT be recorded as a dead domain, or a transient network fault permanently marks a live business as a 35-point lead.
@@ -214,8 +253,20 @@ test('an unexplained failure leaves the lead unenriched rather than marking it d
   // Marking it dead would score a live business as a 35-point lead forever.
 });
 
+test('a JavaScript-rendered shell is not reported as a site without a booking widget', () => {
+  // Measured live: smilecraftbysohail.bolt.host returns 200 and one kilobyte. We
+  // fetched it and learned nothing, so the booleans must stay null and the lead
+  // must stay provisional. Writing false here is a confident false negative, and it
+  // fails in the expensive direction: a client-rendered build is exactly the kind
+  // that does carry a booking widget.
+  const patch = scanHtml('<!doctype html><html><head></head><body><div id="root"></div><script src="/a.js"></script></body></html>');
+  assert.equal(patch.enriched, false);
+  assert.equal(patch.hasBooking, null);
+  assert.equal(patch.hasChatbot, null);
+});
+
 test('every enrichment field is written, so "no chatbot" never includes an uninspected site', () => {
-  const patch = scanHtml('<html></html>');
+  const patch = scanHtml(REAL_PAGE_FIXTURE); // a page with enough markup to read
   for (const field of ['hasChatbot', 'hasBooking', 'mobileFriendly']) {
     assert.notEqual(patch[field], null, `${field} must be false, not null, once inspected`);
   }
