@@ -225,8 +225,30 @@ test('the dashboard UI carries no hardcoded counts left over from the mockup', (
   // "1,284 businesses already exported" was baked into the markup and never
   // replaced, so the Skip duplicates control stated a specific false fact on every
   // load, including the very first one when nothing had been exported at all.
+  // The first version matched only comma-thousands, so it certified a class it could
+  // not see: "1284" without the comma passed, and so did the other mockup figures
+  // sitting nearby, a duplicates count of 6, a harvested count of 18, a permanent
+  // "Harvest leg 2 of 3" in the header and a whole Phase 2 enrichment bar reading
+  // "12 of 18 domains resolved" at 68%.
+  //
+  // Scoped to the slots that display RUNTIME data. Option labels like "15 km" and
+  // "Last 3 months" are real copy, and the score slider's readout legitimately
+  // mirrors its own initial value, so a blanket "no digits" rule would be noise.
   const html = readFileSync(new URL('../src/ui/dashboard/index.html', import.meta.url), 'utf8');
+  const runtimeSlots = [...html.matchAll(/<(dd|em|span)[^>]*\bid="(s-[a-z]+|f-dupe-hint|e-count)"[^>]*>([^<]*)</g)];
+  assert.ok(runtimeSlots.length >= 5, `expected the stat slots to be found, saw ${runtimeSlots.length}`);
+
+  const lying = runtimeSlots
+    .map((m) => ({ id: m[2], text: m[3].trim() }))
+    .filter((slot) => (slot.text.match(/\d+/g) ?? []).some((n) => Number(n) > 1));
+  assert.deepEqual(lying, [], `runtime slots ship hardcoded values: ${JSON.stringify(lying)}`);
+
+  // And nothing anywhere may hardcode a comma-thousands figure.
   const body = html.slice(html.indexOf('<body'));
-  const matches = body.match(/>[^<>]*\b\d{1,3},\d{3}\b[^<>]*</g) ?? [];
-  assert.deepEqual(matches, [], `mockup numbers still in the markup: ${matches.join(' | ')}`);
+  const withCommas = body.match(/>[^<>]*\b\d{1,3},\d{3}\b[^<>]*</g) ?? [];
+  assert.deepEqual(withCommas, [], `mockup numbers still in the markup: ${withCommas.join(' | ')}`);
+
+  // The enrichment progress bar described a Phase 2 that does not exist.
+  assert.ok(!body.includes('domains resolved'), 'the mockup enrichment bar is still present');
+  assert.ok(!body.includes('Harvest leg'), 'the mockup run-state counter is still present');
 });

@@ -379,20 +379,52 @@ test('a swap of small in-range values is still caught, by the integer check', ()
   assert.ok(problems.some((p) => /reviewCount/i.test(p)));
 });
 
-test('a thin market of one-review businesses is harvested, not rejected', () => {
+test('a market full of one-review businesses is harvested, not rejected', () => {
   // This is the case that halted the first live run. Live in Attock, 8 of 19 real
-  // dentists carried a 5.0 rating with one to four reviews. An ordering rule read
-  // every one of them as a swapped index and aborted the whole harvest. Businesses
-  // with almost no reviews are the target market, not a drift signal.
+  // dentists carried a 5.0 rating with one to four reviews, and a per-record
+  // ordering rule read every one of them as a swapped index and aborted the whole
+  // harvest. Businesses with almost no reviews are the target market, not drift.
+  //
+  // The real page also carried established businesses, up to 209 reviews, which is
+  // what makes the sample readable at all. That mix is reproduced here.
   const thin = structuredClone(GOOD);
-  const counts = [1, 4, 2, 1, 3];
+  const ratings = [5, 5, 4.8, 5, 4.9];
+  const counts = [1, 4, 209, 2, 96];
   thin[64].forEach((entry, i) => {
     const r = entry[PAYLOAD_MAP.recordWrapper];
-    r[4][7] = 5;
+    r[4][7] = ratings[i % ratings.length];
     r[4][8] = counts[i % counts.length];
   });
   const { ok, problems } = runCanary(thin, { lat: 33.7609824, lng: 72.342874 });
   assert.equal(ok, true, `a thin market must harvest, got: ${problems.join('; ')}`);
+});
+
+test('a swap hidden by whole-number ratings and tiny counts is refused, not scored', () => {
+  // The gap a review found after an earlier fix removed the ordering rule outright.
+  // The argument for removing it was that a swap puts a fractional rating into the
+  // reviewCount slot, where Number.isInteger rejects it. That fails exactly here: a
+  // listing with one review has a whole-number rating by arithmetic, so in a thin
+  // market a full index swap passes both the range check and the integer check and
+  // every lead ships with rating and reviewCount transposed.
+  const build = (swap) => {
+    const p = structuredClone(GOOD);
+    const ratings = [5, 4, 3, 5, 4];
+    const counts = [1, 2, 3, 4, 5];
+    p[64].forEach((entry, i) => {
+      const r = entry[PAYLOAD_MAP.recordWrapper];
+      r[4][7] = swap ? counts[i % counts.length] : ratings[i % ratings.length];
+      r[4][8] = swap ? ratings[i % ratings.length] : counts[i % counts.length];
+    });
+    return p;
+  };
+  // Both readings are genuinely indistinguishable, so BOTH must be refused. Passing
+  // the unswapped one would mean the check keys on the swap rather than on the
+  // ambiguity, and would then miss the swapped one for the same reason.
+  for (const swap of [false, true]) {
+    const { ok, problems } = runCanary(build(swap), { lat: 33.7609824, lng: 72.342874 });
+    assert.equal(ok, false, `swap=${swap} must be refused as unreadable`);
+    assert.ok(problems.some((p) => /cannot be told apart/i.test(p)), problems.join('; '));
+  }
 });
 
 test('a phone number is rejected in the placeId slot and vice versa', () => {

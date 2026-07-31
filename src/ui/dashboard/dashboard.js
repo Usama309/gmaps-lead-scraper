@@ -75,7 +75,7 @@ function renderRows(leads) {
   }).join('');
 }
 
-function renderStats(leads, totalStored) {
+function renderStats(leads, totalStored, hiddenAsDuplicates) {
   const scores = leads.map((l) => l.score).sort((a, b) => a - b);
   const median = scores.length
     ? (scores.length % 2
@@ -88,6 +88,8 @@ function renderStats(leads, totalStored) {
   $('#s-hot').textContent = leads.filter((l) => l.score >= 80).length;
   $('#s-med').textContent = median;
   $('#s-nosite').innerHTML = `${leads.filter((l) => !l.hasRealWebsite).length}<small> of pass</small>`;
+  // Only meaningful while the toggle is on; with it off nothing is being hidden.
+  $('#s-dupe').textContent = state.skipExported ? hiddenAsDuplicates : 0;
   $('#e-count').textContent = leads.length;
 }
 
@@ -118,10 +120,10 @@ function renderExportedCount(count) {
 
 async function refresh() {
   try {
-    const { leads, totalStored, exportedCount } = await send(MSG.GET_LEADS, state);
+    const { leads, totalStored, exportedCount, hiddenAsDuplicates } = await send(MSG.GET_LEADS, state);
     clearError();
     renderRows(leads);
-    renderStats(leads, totalStored);
+    renderStats(leads, totalStored, hiddenAsDuplicates);
     renderExportedCount(exportedCount);
   } catch (error) {
     // Clear the table as well as showing the message. Leaving the previous rows

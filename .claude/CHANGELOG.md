@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Fixed
+- [2026-07-30 11:40 PM] Adversarial review of the live-run fixes found six blockers, all fixed:
+  a swap of rating and reviewCount went undetected in a thin market (whole-number ratings defeat
+  the integer check, so the sample-level ambiguity check replaces it); the cookie rule's scope was
+  `tabIds: [-1]`, which includes a website's own service worker, so it is now matched on a marker
+  only our own requests carry; a session rule stranded by a killed worker was never swept; a failed
+  removal was silently discarded; a missing cookie was announced as advisory when it is fatal; and
+  two shipped tests certified properties they could not detect
+- [2026-07-30 11:40 PM] Three further hardcoded mockup values in the dashboard: a duplicates count
+  of 6, a harvested count of 18, and a permanent "Harvest leg 2 of 3" header
+- [2026-07-30 11:40 PM] Out-of-area results were counted per record rather than per business, so an
+  overlapping 21-leg run inflated the figure by roughly the leg count
 - [2026-07-30 10:45 PM] Review count was missing from every harvested lead. Google omits it unless
   the request carries a session cookie, and `credentials: 'omit'` suppressed all of them. Isolated
   live, same pb and context back to back: cookieless 5% coverage, cookie-bearing 95%

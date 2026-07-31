@@ -87,11 +87,20 @@ export const CONFIG = deepFreeze({
     // NID is Google's anonymous preferences cookie. It carries no account.
     allow: ['NID'],
     ruleId: 1,
-    urlFilter: '||google.com/search',
+    // A marker WE put on our own requests, and the only thing the rule matches on.
+    //
+    // Scoping by `tabIds: [-1]` alone was wrong. That value means "not associated
+    // with a tab", which is a larger set than "sent by this worker": a website's own
+    // service worker lands in it too, and google.com registers one. Since the rule
+    // SETS the header rather than appending, a Google-originated service worker
+    // request to /search would have gone out carrying only our cookie, with the
+    // operator's real session stripped. Matching a marker only we ever write closes
+    // that, because no request we did not build can carry it.
+    marker: 'mpsrc',
+    markerValue: '1',
     resourceTypes: ['xmlhttprequest', 'other'],
-    // -1 means "not from a tab", i.e. only requests this worker makes itself. Without
-    // it the rule would also rewrite the Cookie header on Google Maps' OWN requests
-    // in the operator's tab, stripping their real session and breaking the page.
+    // Kept as a second condition alongside the marker. Belt and braces: either one
+    // alone would do, and neither costs anything.
     workerOnlyTabId: -1,
   },
 

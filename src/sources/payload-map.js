@@ -175,23 +175,28 @@ export const CANARY_RULES = Object.freeze({
   // Two mapped fields holding the same value on more than a quarter of records
   // means the indices collided. Genuine data essentially never does this.
   maxFieldCollisionRatio: 0.25,
-  // There is deliberately NO reviewCount-versus-rating ordering rule here, and the
-  // reason is worth keeping, because an earlier version had one and it halted the
-  // first live run against real data.
+  // A rating/reviewCount swap is checked on the SAMPLE, not per record, and the
+  // history here is worth keeping because both earlier attempts were wrong.
   //
-  // Ratings are capped at 5, so `reviewCount < rating` can only ever be true when
-  // reviewCount is 4 or less. That makes the ordering test fire exclusively on tiny
-  // businesses: live in Attock, 8 of 19 real dentists had a 5.0 rating and one to
-  // four reviews, and every one of them read as "swapped". Small businesses with
-  // almost no reviews are not noise in this product, they are the target market.
+  // The first was a per-record ordering rule, `reviewCount >= rating`. Ratings are
+  // capped at 5, so that can only ever be violated when reviewCount is 4 or less,
+  // which means it fired exclusively on very small businesses. Live in Attock, 8 of
+  // 19 real dentists had a 5.0 rating and one to four reviews, and it aborted the
+  // whole run. Those businesses are the target market, not drift.
   //
-  // Nothing is lost by dropping it, because a genuine swap is caught upstream and
-  // more reliably. Exchanging the two indices puts the rating into the reviewCount
-  // slot, and real ratings are fractional (4.9, 4.7, 3.9), so
-  // `Number.isInteger` on reviewCount rejects it. It also puts the count into the
-  // rating slot, where anything above 5 fails the range check. A swap would have to
-  // survive BOTH: every rating in the sample a whole number AND every count 5 or
-  // under. Across a 20-record page of real businesses that does not happen.
+  // Removing it outright was also wrong. The argument was that a swap puts a
+  // fractional rating into the reviewCount slot, where Number.isInteger rejects it.
+  // That fails on exactly the market this tool is for: a listing with one review has
+  // a whole-number rating by arithmetic, so in a thin market every rating can be a
+  // whole number and the swap sails through both validators. A review reproduced it
+  // on a 20-record page and the canary reported no problems at all.
+  //
+  // What survives is the aggregate shape. A swapped column puts ratings into
+  // reviewCount, so EVERY count would be at or below the rating ceiling of 5. Any
+  // real page mixes in at least one established business with more than a handful of
+  // reviews; live in Attock the counts ran to 209. When a whole sample looks like it
+  // could be either, we cannot tell, and saying so is the honest stop.
+  swapCeiling: 5,
   // A record's coordinates should sit near the point we queried. A lat/lng swap
   // passes both range checks whenever |longitude| is under 90, which covers most
   // of the inhabited world, so range validation alone cannot catch it.
@@ -357,6 +362,31 @@ export function runCanary(parsed, expect = {}) {
           + `below the ${Math.round(rule.minCoverage * 100)}% floor (${rule.why})`
         );
       }
+    }
+  }
+
+  // Sample-level swap check. See the note beside swapCeiling for why this is not a
+  // per-record ordering test and not absent altogether.
+  if (judgeCoverage) {
+    const paired = records
+      .map((r) => ({
+        rating: at(r, PAYLOAD_MAP.record.rating),
+        reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
+      }))
+      .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
+
+    const ambiguous = paired.length > 0
+      && paired.every((v) => v.reviewCount <= CANARY_RULES.swapCeiling)
+      && paired.every((v) => Number.isInteger(v.rating));
+
+    if (ambiguous) {
+      problems.push(
+        `every one of ${paired.length} records has a whole-number rating and no more than `
+        + `${CANARY_RULES.swapCeiling} reviews, so rating at [${PAYLOAD_MAP.record.rating}] and `
+        + `reviewCount at [${PAYLOAD_MAP.record.reviewCount}] cannot be told apart. Either those `
+        + 'indices have swapped, or this really is a market of brand new listings. We cannot '
+        + 'distinguish the two, so the numbers are not safe to score on'
+      );
     }
   }
 

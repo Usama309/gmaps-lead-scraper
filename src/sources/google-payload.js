@@ -2,6 +2,7 @@ import { CONFIG } from '../core/config.js';
 import { assertStopReason } from './source.js';
 import { extractPage, runCanary } from './payload-map.js';
 import { classifyTransport, classifyPage, nextDelayMs, createLatencyWatch } from '../pipeline/guard.js';
+import { markerParam } from './anon-cookie.js';
 
 const SEARCH_ENDPOINT = 'https://www.google.com/search';
 
@@ -52,6 +53,12 @@ async function defaultFetchPage({ query, pb, signal }) {
   url.searchParams.set('tbm', 'map');
   url.searchParams.set('authuser', '0');
   url.searchParams.set('hl', 'en');
+  // The marker the cookie rule matches on. This is the ONLY line that writes it, and
+  // it is what makes the rule's scope exact rather than "anything without a tab".
+  // Google ignores the parameter; verified live that the payload is byte-identical
+  // in shape with and without it.
+  const marker = markerParam();
+  url.searchParams.set(marker.name, marker.value);
   url.searchParams.set('q', query);
   url.searchParams.set('pb', pb);
 

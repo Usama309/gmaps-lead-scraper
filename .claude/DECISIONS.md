@@ -112,6 +112,38 @@ discarding a real business because Google omitted its position is the worse erro
 The discard count is reported to the operator rather than swallowed, because its size is
 information. A large number means the radius is thinner than the keyword can fill.
 
+## Scope the cookie rule on a marker we write, not on `tabIds: [-1]`
+**Date:** 2026-07-30 (adversarial review)
+
+`tabIds: [-1]` means "not associated with a tab", which is a strictly larger set than "sent by this
+worker": a website's own service worker falls in it, and google.com registers one. Because the rule
+SETS the Cookie header rather than appending, a Google-originated service-worker request to /search
+would have gone out carrying only our cookie, with the operator's real session stripped. That is the
+exact breakage the condition was added to prevent.
+
+The live sentinel check did not catch it: it exercised a page-initiated request, which has a tabId of
+0 or more, so it proved nothing about the -1 bucket.
+
+The request now carries a marker query parameter written by exactly one line of code, and the rule
+matches on it. No request this extension did not build can match, whatever context it comes from.
+`tabIds: [-1]` is kept as a redundant second condition. Verified live that Google's payload is
+unchanged with the parameter present.
+
+## Refuse a payload where rating and reviewCount cannot be told apart
+**Date:** 2026-07-30 (adversarial review)
+
+Removing the ordering rule outright was wrong, and the argument for removing it was wrong in a
+specific way worth recording: "a swap puts a fractional rating into the reviewCount slot, where
+Number.isInteger rejects it" fails exactly on the market this tool targets, because a listing with
+one review has a whole-number rating by arithmetic. A review reproduced a full index swap on a
+20-record thin-market page and the canary reported no problems at all.
+
+The check is now on the sample, not the record: if every rating is a whole number AND no count
+exceeds the rating ceiling of 5, the two columns are indistinguishable and the payload is refused.
+Both the swapped and unswapped forms are refused, deliberately, because keying on the swap rather
+than on the ambiguity would miss the swap for the same reason. Any real page carries at least one
+established business, so this does not fire in practice: live in Attock the counts ran to 209.
+
 ## Remove the reviewCount-versus-rating ordering rule from the canary
 **Date:** 2026-07-30
 

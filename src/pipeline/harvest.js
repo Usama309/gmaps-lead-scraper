@@ -142,9 +142,11 @@ export async function runHarvest({
   const byKey = new Map();
   const problems = [];
   let completedLegs = startAt;
-  // Counted, not swallowed. A run that quietly dropped most of what it fetched
-  // would look like a thin market rather than like a radius doing its job.
-  let outsideArea = 0;
+  // Counted by BUSINESS, not by record. Legs overlap by design, so the same
+  // out-of-area business is returned by many of them; counting records made the
+  // figure roughly leg count times the truth, and made it incomparable with the
+  // deduped kept count it sits beside.
+  const outsideKeys = new Set();
 
   // Index of the first leg that failed without halting the run. Resume restarts
   // from there rather than past it, so a transient network fault costs a repeat
@@ -156,7 +158,7 @@ export async function runHarvest({
     stopReason: assertStopReason(stopReason),
     completedLegs,
     problems,
-    outsideArea,
+    outsideArea: outsideKeys.size,
   });
 
   for (let i = startAt; i < legs.length; i += 1) {
@@ -188,7 +190,7 @@ export async function runHarvest({
       // Filtered before the dedupe map, so an out-of-area business never occupies a
       // key and can never be counted as unique.
       if (!insideArea(lead, area)) {
-        outsideArea += 1;
+        outsideKeys.add(lead.key);
         continue;
       }
       if (!byKey.has(lead.key)) {

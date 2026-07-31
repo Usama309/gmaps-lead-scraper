@@ -71,8 +71,20 @@ export function buildCookieHeader(cookies, allow = CONFIG.anonCookie.allow) {
   return pairs.length > 0 ? pairs.join('; ') : null;
 }
 
+/**
+ * The query marker that identifies a request as ours.
+ *
+ * The single source of truth for both halves: google-payload.js writes it onto the
+ * URL, and the rule below matches on it. If these two ever disagreed the rule would
+ * silently match nothing, so neither may hardcode the string.
+ */
+export function markerParam(config = CONFIG.anonCookie) {
+  return { name: config.marker, value: config.markerValue };
+}
+
 /** The declarativeNetRequest rule that writes that header onto our own requests. */
 export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
+  const { name, value } = markerParam(config);
   return {
     id: config.ruleId,
     priority: 1,
@@ -84,7 +96,10 @@ export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
       requestHeaders: [{ header: 'cookie', operation: 'set', value: cookieHeader }],
     },
     condition: {
-      urlFilter: config.urlFilter,
+      // Host, path AND our own marker. The marker is what makes this precise: it is
+      // written by exactly one line of code in this extension, so no request built by
+      // anyone else can match, whatever context it comes from.
+      urlFilter: `||www.google.com/search?*${name}=${value}`,
       resourceTypes: [...config.resourceTypes],
       tabIds: [config.workerOnlyTabId],
     },
@@ -94,9 +109,14 @@ export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
 /**
  * Install the rule for the duration of a run.
  *
- * Returns what happened so the caller can tell the operator why review counts are
- * missing, rather than leaving them to discover it as a canary failure. Never
- * throws: a run without review counts is worth far more than no run at all.
+ * Failing to install is FATAL, not advisory, and the caller must treat it that way.
+ * An earlier version told the operator "review counts will be missing" and started
+ * the run anyway. That was wrong: reviewCount carries a canary coverage floor of
+ * 80%, cookieless coverage is about 5%, so the very first page fails the canary and
+ * the whole job halts with a payload-drift error that has nothing to do with drift.
+ * Better to say so before spending a single request.
+ *
+ * Never throws, so the caller decides what to do rather than losing the reason.
  */
 export async function installAnonCookieRule({ cookies, declarativeNetRequest, config = CONFIG.anonCookie }) {
   try {
@@ -107,7 +127,8 @@ export async function installAnonCookieRule({ cookies, declarativeNetRequest, co
       return {
         installed: false,
         reason: `no anonymous Google cookie found (looked for ${config.allow.join(', ')}). `
-          + 'Review counts will be missing. Open Google Maps once and retry.',
+          + 'Google omits review counts without one, and the payload check then halts the run, '
+          + 'so there is nothing to gain by starting. Open Google Maps once and retry.',
       };
     }
 

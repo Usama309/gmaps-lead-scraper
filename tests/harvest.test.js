@@ -494,3 +494,23 @@ test('without an area, every lead is kept', async () => {
   assert.equal(result.leads.length, 1);
   assert.equal(result.outsideArea, 0);
 });
+
+test('out-of-area results are counted once per business, not once per leg', async () => {
+  // Legs overlap by design, so the same far-away business comes back from many of
+  // them. Counting records reported roughly leg-count times the truth, and made the
+  // figure incomparable with the deduped kept count printed beside it.
+  const centre = { lat: 33.7609824, lng: 72.342874 };
+  const far = { lat: 34.0151, lng: 71.5249, key: 'one-far-business', name: 'Peshawar Clinic' };
+  const source = { id: 'fake', harvestLeg: async () => ({ leads: [far], stopReason: 'end_of_list', problems: [] }) };
+
+  const legs = Array.from({ length: 8 }, (_, i) => ({
+    id: `l${i}`, query: 'dentist', keyword: 'dentist', tileIndex: i, ...centre, zoom: 14,
+  }));
+
+  const result = await runHarvest({
+    legs, pb: 'pb', area: { ...centre, radiusKm: 2 }, source, delay: async () => {},
+  });
+
+  assert.equal(result.leads.length, 0);
+  assert.equal(result.outsideArea, 1, 'one business seen by eight legs is one business');
+});

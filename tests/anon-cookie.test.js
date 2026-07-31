@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCookieHeader,
   buildRule,
+  markerParam,
   installAnonCookieRule,
   removeAnonCookieRule,
   ACCOUNT_COOKIE_NAMES,
@@ -96,8 +97,28 @@ test('the rule only matches requests that come from no tab', () => {
   assert.deepEqual(buildRule('NID=x').condition.tabIds, [-1]);
 });
 
-test('the rule is scoped to the Google search endpoint', () => {
-  assert.equal(buildRule('NID=x').condition.urlFilter, CONFIG.anonCookie.urlFilter);
+test('the rule is scoped to the Google search endpoint and to our own marker', () => {
+  // Asserted against literals on purpose. Comparing the rule back to the same config
+  // value it was built from is a tautology: it passed even when the filter was
+  // changed to an unrelated attacker-controlled host, which is the one thing that
+  // bounds where the cookie can travel.
+  const filter = buildRule('NID=x').condition.urlFilter;
+  assert.match(filter, /^\|\|www\.google\.com\/search\?/, `rule must target Google search, got ${filter}`);
+  assert.match(filter, /mpsrc=1/, 'rule must require our own request marker');
+});
+
+test('the marker the rule matches is the marker the request writes', () => {
+  // Two halves in different files. If they ever disagree the rule matches nothing,
+  // the cookie never travels, and the run dies on a canary error that blames Google.
+  const { name, value } = markerParam();
+  assert.ok(buildRule('NID=x').condition.urlFilter.includes(`${name}=${value}`));
+});
+
+test('a request without our marker does not match the rule', () => {
+  const filter = buildRule('NID=x').condition.urlFilter;
+  const pattern = filter.replace('||', 'https://').replace(/\?\*/, '\\?.*');
+  assert.ok(!new RegExp(pattern).test('https://www.google.com/search?tbm=map&q=x'),
+    'a Google search request built by anyone else must not match');
 });
 
 test('installing writes a session rule, never a dynamic one', async () => {

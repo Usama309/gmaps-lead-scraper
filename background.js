@@ -77,8 +77,11 @@ async function startRun(config) {
     // This writes back exactly one allowlisted, account-free cookie for the duration
     // of the run. Advisory, not fatal: without it the run still works, it just loses
     // the field, and the operator is told so rather than left to guess.
+    // Fatal, not advisory. Without the cookie, Google omits review counts, the
+    // canary's 80% coverage floor fails on the first page and the run halts anyway,
+    // but with a payload-drift message that misdirects the operator entirely.
     const cookieRule = await installAnonCookieRule(chrome);
-    if (!cookieRule.installed) broadcast(MSG.RUN_NOTICE, { message: cookieRule.reason });
+    if (!cookieRule.installed) throw new Error(cookieRule.reason);
 
     // Serialises every store write for this run, so they land in order and can be
     // drained before the run reports done.
@@ -158,21 +161,48 @@ async function startRun(config) {
   } finally {
     // Every path out, including abort and failure. A rule left installed keeps
     // rewriting a header in the operator's browser after the run that needed it is
-    // long gone.
-    await removeAnonCookieRule(chrome);
+    // long gone. The result is checked rather than discarded: a silent failure here
+    // is exactly the case where nobody would ever find out.
+    const removal = await removeAnonCookieRule(chrome);
+    if (!removal.removed) {
+      console.error('the anonymous-cookie rule could not be removed', removal.reason);
+      broadcast(MSG.RUN_NOTICE, {
+        message: 'the anonymous-cookie rule could not be removed and is still active. '
+          + 'Restart the browser to clear it.',
+      });
+    }
     activeRun = null;
   }
 }
 
+/**
+ * Clear any rule stranded by a previous worker.
+ *
+ * `finally` is not a guarantee in MV3. The worker can be evicted, crashed or stopped
+ * from chrome://extensions between installing the rule and removing it, and a
+ * SESSION rule survives all three: it is held for the browser session, not for the
+ * worker's lifetime. `activeRun` dies with the worker, the rule does not, so without
+ * this sweep the asymmetry leaves a header-rewriting rule running with no run behind
+ * it. Runs on every worker start, which is the one moment we know no run is active.
+ */
+removeAnonCookieRule(chrome).catch((error) => {
+  console.error('could not sweep a stranded anonymous-cookie rule', error);
+});
+
 async function getLeads(filterState) {
   const [leads, exportedKeys] = await Promise.all([getAllLeads(), getExportedKeys()]);
+  const filtered = filterLeads(leads, { ...filterState, exportedKeys });
   return {
-    leads: filterLeads(leads, { ...filterState, exportedKeys }),
+    leads: filtered,
     totalStored: leads.length,
-    // Returned so the Skip duplicates control can state the real number. It used to
-    // carry a figure hardcoded from the mockup, which told the operator that 1,284
-    // businesses had been exported no matter what had actually happened.
+    // Both returned so the UI can state real numbers. Three figures in that panel
+    // were hardcoded from the mockup and never replaced, so it asserted that 1,284
+    // businesses had been exported and 6 duplicates hidden no matter what had
+    // actually happened.
     exportedCount: exportedKeys?.size ?? 0,
+    hiddenAsDuplicates: exportedKeys
+      ? leads.filter((l) => exportedKeys.has(l.key)).length
+      : 0,
   };
 }
 
