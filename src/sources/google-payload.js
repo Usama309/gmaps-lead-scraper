@@ -4,7 +4,7 @@ import { extractPage, runCanary } from './payload-map.js';
 import { classifyTransport, classifyPage, nextDelayMs, createLatencyWatch } from '../pipeline/guard.js';
 import { markerParam } from './anon-cookie.js';
 
-const SEARCH_ENDPOINT = 'https://www.google.com/search';
+
 
 /**
  * Substitute the result offset into a captured pb blob.
@@ -48,19 +48,24 @@ export function setPbCentre(pb, { lat, lng, zoom }) {
  * account-free cookie names. Keeping `omit` here is what makes that an allowlist:
  * Chrome contributes nothing, so the only cookie that can travel is one we named.
  */
-async function defaultFetchPage({ query, pb, signal }) {
-  const url = new URL(SEARCH_ENDPOINT);
+export function buildSearchUrl({ query, pb }) {
+  const url = new URL(CONFIG.googleSearchUrl);
   url.searchParams.set('tbm', 'map');
   url.searchParams.set('authuser', '0');
   url.searchParams.set('hl', 'en');
   // The marker the cookie rule matches on. This is the ONLY line that writes it, and
   // it is what makes the rule's scope exact rather than "anything without a tab".
-  // Google ignores the parameter; verified live that the payload is byte-identical
-  // in shape with and without it.
+  // Exported, and tested against the rule that consumes it: deleting this line used
+  // to leave the whole suite green while the cookie silently stopped travelling.
   const marker = markerParam();
   url.searchParams.set(marker.name, marker.value);
   url.searchParams.set('q', query);
   url.searchParams.set('pb', pb);
+  return url;
+}
+
+async function defaultFetchPage({ query, pb, signal }) {
+  const url = buildSearchUrl({ query, pb });
 
   const started = Date.now();
   const response = await fetch(url, { credentials: 'omit', signal });
@@ -106,6 +111,11 @@ export const googlePayloadSource = {
     let offset = 0;
     let canaryChecked = false;
 
+    // Things the canary could not confirm on a page, as opposed to things it found
+    // wrong. These never stop the leg, but they must reach the operator, so every
+    // exit carries them.
+    const notices = [];
+
     // Wired, not decorative. This was hardened across three review rounds and then
     // had no callers, so only hard block detection was live. Sustained slowdown is
     // the earliest warning we get that we are pushing too hard, well before a 429.
@@ -121,7 +131,7 @@ export const googlePayloadSource = {
     const finish = (stopReason, problems = []) => ({
       leads,
       stopReason: assertStopReason(stopReason),
-      problems,
+      problems: [...notices, ...problems],
     });
 
     while (offset < CONFIG.harvest.perQueryCap) {
@@ -177,6 +187,10 @@ export const googlePayloadSource = {
         if (!canary.ok) {
           return finish('canary_failed', canary.problems);
         }
+        // Warnings do not stop the leg. They travel out with it, so a page the canary
+        // could not fully read is reported to the operator rather than either halting
+        // the job or vanishing.
+        if (canary.warnings?.length) notices.push(...canary.warnings);
       }
 
       const extracted = extractPage(parsed);

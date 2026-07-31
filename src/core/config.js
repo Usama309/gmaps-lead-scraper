@@ -83,6 +83,12 @@ export const CONFIG = deepFreeze({
    * Google ACCOUNT cookie cannot ride along even if Google ships a new cookie name
    * tomorrow, because anything not named here is simply never written.
    */
+  // The one endpoint the harvester calls, and the one the cookie rule matches. Both
+  // halves read it from here: two literals in two files decided whether the cookie
+  // travelled at all, and changing either would have made the rule match nothing
+  // while every test stayed green.
+  googleSearchUrl: 'https://www.google.com/search',
+
   anonCookie: {
     // NID is Google's anonymous preferences cookie. It carries no account.
     allow: ['NID'],

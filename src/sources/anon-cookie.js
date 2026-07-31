@@ -99,7 +99,7 @@ export function buildRule(cookieHeader, config = CONFIG.anonCookie) {
       // Host, path AND our own marker. The marker is what makes this precise: it is
       // written by exactly one line of code in this extension, so no request built by
       // anyone else can match, whatever context it comes from.
-      urlFilter: `||www.google.com/search?*${name}=${value}`,
+      urlFilter: `||${new URL(CONFIG.googleSearchUrl).host}${new URL(CONFIG.googleSearchUrl).pathname}?*${name}=${value}`,
       resourceTypes: [...config.resourceTypes],
       tabIds: [config.workerOnlyTabId],
     },

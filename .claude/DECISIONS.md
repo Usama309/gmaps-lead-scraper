@@ -112,6 +112,26 @@ discarding a real business because Google omitted its position is the worse erro
 The discard count is reported to the operator rather than swallowed, because its size is
 information. A large number means the radius is thinner than the keyword can fill.
 
+## Ambiguity is reported, drift is halted, and the two must not share a channel
+**Date:** 2026-07-30 (second adversarial review)
+
+`runCanary` now returns `warnings` alongside `problems`. Only problems produce `canary_failed`, which
+is a HALTING reason that ends the whole job.
+
+This exists because the previous fix put the rating/reviewCount ambiguity into `problems`. That reads
+as rigour and is far more damaging than the bug it replaced: the canary runs on the first page of
+EVERY leg, up to 60 of them, so a single six-record outer tile of a rural run aborted the entire job.
+Thin rural markets are what this product sells into. Measured: a six-record page of genuine new
+listings returned `ok: false`.
+
+Ambiguity is not evidence of drift, it is the absence of evidence either way, and the honest response
+is to say so and keep working. Real drift still halts through the per-field validators, which are
+strictly better at it.
+
+The warning is also gated at the small-page threshold of 2 rather than the coverage threshold of 5.
+Using 5 reintroduced the exact blind spot this file had already closed for total field loss: a
+four-record page could be fully transposed and say nothing at all.
+
 ## Scope the cookie rule on a marker we write, not on `tabIds: [-1]`
 **Date:** 2026-07-30 (adversarial review)
 
@@ -152,8 +172,11 @@ can only be true when reviewCount is 4 or less, which means the rule fires exclu
 businesses. Live in Attock, 8 of 19 real dentists had a 5.0 rating with one to four reviews. Those
 are the target market, not drift.
 
-Nothing was lost by removing it. A genuine index swap puts the rating into the reviewCount slot, and
-real ratings are fractional, so `Number.isInteger` rejects it; it also puts the count into the rating
-slot, where anything above 5 fails the range check. Surviving both would require every rating in a
-20-record sample to be a whole number AND every count to be 5 or under. The replacement test proves
-the integer check is what now carries swap detection: weakening it makes that test fail.
+**This section's original reasoning was wrong, twice, and the corrections are recorded above under
+"Refuse a payload where rating and reviewCount cannot be told apart" and below.** The claim that
+"real ratings are fractional" fails on a one-review listing, whose rating is a whole number by
+arithmetic, which is most of a thin market. The follow-up claim that "the replacement test proves the
+integer check carries swap detection" was also false: that test asserted only that a problem
+mentioning `reviewCount` was raised, and the ambiguity message contains that word too, so deleting
+`Number.isInteger` left the suite green. There is now a test that asserts the integer check produces
+a "wrong shape" problem specifically, and it fails when the check is weakened.

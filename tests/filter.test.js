@@ -235,12 +235,21 @@ test('the dashboard UI carries no hardcoded counts left over from the mockup', (
   // "Last 3 months" are real copy, and the score slider's readout legitimately
   // mirrors its own initial value, so a blanket "no digits" rule would be noise.
   const html = readFileSync(new URL('../src/ui/dashboard/index.html', import.meta.url), 'utf8');
-  const runtimeSlots = [...html.matchAll(/<(dd|em|span)[^>]*\bid="(s-[a-z]+|f-dupe-hint|e-count)"[^>]*>([^<]*)</g)];
-  assert.ok(runtimeSlots.length >= 5, `expected the stat slots to be found, saw ${runtimeSlots.length}`);
-
-  const lying = runtimeSlots
-    .map((m) => ({ id: m[2], text: m[3].trim() }))
-    .filter((slot) => (slot.text.match(/\d+/g) ?? []).some((n) => Number(n) > 1));
+  // Named explicitly, and every one must be FOUND. The previous version matched only
+  // <dd|em|span> while listing `e-count` in its own pattern, and `e-count` is a <b>.
+  // A `length >= 5` assertion then masked the miss: seven slots matched, e-count was
+  // never among them, and setting it to 18 kept the suite green.
+  const EXPECTED = ['s-harv', 's-pass', 's-hot', 's-med', 's-nosite', 's-dupe', 'f-dupe-hint', 'e-count'];
+  const lying = [];
+  for (const id of EXPECTED) {
+    const m = html.match(new RegExp(`<[a-z]+[^>]*\\bid="${id}"[^>]*>([^<]*)<`));
+    assert.ok(m, `runtime slot ${id} was not found at all, so this test cannot see it`);
+    // Any literal digit is suspect: every one of these is written by dashboard.js at
+    // runtime, so the markup placeholder must be 0. Allowing 1 through let a
+    // hardcoded "1" ship.
+    const digits = m[1].match(/\d+/g) ?? [];
+    if (digits.some((n) => Number(n) !== 0)) lying.push({ id, text: m[1].trim() });
+  }
   assert.deepEqual(lying, [], `runtime slots ship hardcoded values: ${JSON.stringify(lying)}`);
 
   // And nothing anywhere may hardcode a comma-thousands figure.

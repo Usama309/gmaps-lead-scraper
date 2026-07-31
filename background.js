@@ -74,12 +74,12 @@ async function startRun(config) {
 
     // Google omits the review count from every record unless the request carries an
     // anonymous session cookie, and `credentials: 'omit'` suppresses all of them.
-    // This writes back exactly one allowlisted, account-free cookie for the duration
-    // of the run. Advisory, not fatal: without it the run still works, it just loses
-    // the field, and the operator is told so rather than left to guess.
-    // Fatal, not advisory. Without the cookie, Google omits review counts, the
-    // canary's 80% coverage floor fails on the first page and the run halts anyway,
-    // but with a payload-drift message that misdirects the operator entirely.
+    // This writes back exactly one allowlisted, account-free cookie for the run.
+    //
+    // Fatal, not advisory. Without the cookie, reviewCount coverage is about 5%
+    // against a canary floor of 80%, so the first page fails and the run halts
+    // anyway, but with a payload-drift message that misdirects the operator
+    // entirely. Better to say the true reason before spending a single request.
     const cookieRule = await installAnonCookieRule(chrome);
     if (!cookieRule.installed) throw new Error(cookieRule.reason);
 
@@ -192,6 +192,11 @@ removeAnonCookieRule(chrome).catch((error) => {
 async function getLeads(filterState) {
   const [leads, exportedKeys] = await Promise.all([getAllLeads(), getExportedKeys()]);
   const filtered = filterLeads(leads, { ...filterState, exportedKeys });
+  // Counted as "how many MORE would show if only this toggle flipped", not "how many
+  // stored leads happen to be exported". skipExported is applied last, after every
+  // other predicate, so the naive count included leads already excluded by score or
+  // rating and the two figures on the readout could not be reconciled.
+  const withoutSkip = filterLeads(leads, { ...filterState, exportedKeys, skipExported: false });
   return {
     leads: filtered,
     totalStored: leads.length,
@@ -200,9 +205,7 @@ async function getLeads(filterState) {
     // businesses had been exported and 6 duplicates hidden no matter what had
     // actually happened.
     exportedCount: exportedKeys?.size ?? 0,
-    hiddenAsDuplicates: exportedKeys
-      ? leads.filter((l) => exportedKeys.has(l.key)).length
-      : 0,
+    hiddenAsDuplicates: Math.max(0, withoutSkip.length - filtered.length),
   };
 }
 

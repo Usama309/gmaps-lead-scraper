@@ -399,13 +399,21 @@ test('a market full of one-review businesses is harvested, not rejected', () => 
   assert.equal(ok, true, `a thin market must harvest, got: ${problems.join('; ')}`);
 });
 
-test('a swap hidden by whole-number ratings and tiny counts is refused, not scored', () => {
-  // The gap a review found after an earlier fix removed the ordering rule outright.
-  // The argument for removing it was that a swap puts a fractional rating into the
-  // reviewCount slot, where Number.isInteger rejects it. That fails exactly here: a
-  // listing with one review has a whole-number rating by arithmetic, so in a thin
-  // market a full index swap passes both the range check and the integer check and
-  // every lead ships with rating and reviewCount transposed.
+test('an unreadable page warns and keeps harvesting, it does not abort the run', () => {
+  // Two earlier attempts at this were both wrong, in opposite directions, and the
+  // second one was worse.
+  //
+  // Attempt one: a per-record `reviewCount >= rating` rule. Ratings cap at 5, so it
+  // could only fire on businesses with four reviews or fewer, and it aborted the
+  // first live run on real Attock dentists.
+  //
+  // Attempt two: refuse the page outright when every rating is whole and every count
+  // is tiny. That reads as rigour and is actually far more damaging: `canary_failed`
+  // is a HALTING reason, so a single six-record outer tile of a rural run killed the
+  // entire sixty-leg job. Thin rural markets are what this product sells into.
+  //
+  // Ambiguity is not evidence of drift, it is the absence of evidence. It is
+  // reported and harvesting continues.
   const build = (swap) => {
     const p = structuredClone(GOOD);
     const ratings = [5, 4, 3, 5, 4];
@@ -417,14 +425,44 @@ test('a swap hidden by whole-number ratings and tiny counts is refused, not scor
     });
     return p;
   };
-  // Both readings are genuinely indistinguishable, so BOTH must be refused. Passing
-  // the unswapped one would mean the check keys on the swap rather than on the
-  // ambiguity, and would then miss the swapped one for the same reason.
   for (const swap of [false, true]) {
-    const { ok, problems } = runCanary(build(swap), { lat: 33.7609824, lng: 72.342874 });
-    assert.equal(ok, false, `swap=${swap} must be refused as unreadable`);
-    assert.ok(problems.some((p) => /cannot be told apart/i.test(p)), problems.join('; '));
+    const result = runCanary(build(swap), { lat: 33.7609824, lng: 72.342874 });
+    assert.equal(result.ok, true, `swap=${swap} must not halt the run`);
+    assert.ok(result.warnings.some((w) => /cannot be told apart/i.test(w)),
+      `swap=${swap} must still be reported: ${JSON.stringify(result.warnings)}`);
   }
+});
+
+test('a genuinely thin market is harvested without even a halt-worthy problem', () => {
+  // The exact shape that aborted a sixty-leg run: a six-record outer tile of real
+  // new listings.
+  const thin = structuredClone(GOOD);
+  thin[64] = thin[64].slice(0, 6);
+  const ratings = [5, 5, 4, 5, 3, 5];
+  const counts = [1, 2, 1, 4, 1, 3];
+  thin[64].forEach((entry, i) => {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = ratings[i]; r[4][8] = counts[i];
+  });
+  const { ok, problems } = runCanary(thin, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, true, `a thin tile must not abort the job, got: ${problems.join('; ')}`);
+});
+
+test('a fractional value in the reviewCount slot is a PROBLEM, not merely a warning', () => {
+  // This is what actually carries swap detection, and it must be verifiable on its
+  // own. A previous version of this file claimed the integer check carried it while
+  // the assertion only matched the string "reviewCount", which the ambiguity warning
+  // also contains, so removing Number.isInteger left the suite green.
+  const fractional = structuredClone(GOOD);
+  fractional[64].forEach((entry, i) => {
+    const r = entry[PAYLOAD_MAP.recordWrapper];
+    r[4][7] = 4.6;
+    r[4][8] = i === 0 ? 4.3 : 40 + i; // one fractional count, sample otherwise readable
+  });
+  const { ok, problems } = runCanary(fractional, { lat: 33.7609824, lng: 72.342874 });
+  assert.equal(ok, false, 'a non-integer review count must stop the run');
+  assert.ok(problems.some((p) => /wrong shape/i.test(p) && /reviewCount/.test(p)),
+    `expected a shape problem naming reviewCount, got: ${problems.join('; ')}`);
 });
 
 test('a phone number is rejected in the placeId slot and vice versa', () => {
@@ -465,4 +503,17 @@ test('CANARY_RULES marks name and cid as required, since they are the record ide
     assert.equal(typeof rule.valid, 'function', `${rule.field} needs a validator`);
     assert.ok(rule.why, `${rule.field} needs an explanation for the operator`);
   }
+});
+
+test('swapCeiling is pinned to the rating ceiling, in both directions', () => {
+  // It is not a free tunable. It is the maximum a rating can be, and that is the
+  // whole reason the ambiguity exists: a count at or below it could equally be a
+  // rating. Raising it silently widens the warning to pages that are perfectly
+  // readable; lowering it stops the warning firing at all. Only the range check's
+  // own upper bound is correct here.
+  const ratingRule = CANARY_RULES.fields.find((f) => f.field === 'rating');
+  assert.equal(CANARY_RULES.swapCeiling, 5);
+  assert.equal(ratingRule.valid(CANARY_RULES.swapCeiling), true, 'the ceiling must be a valid rating');
+  assert.equal(ratingRule.valid(CANARY_RULES.swapCeiling + 0.1), false,
+    'anything above the ceiling must fail the rating range check, which is what makes a swap visible');
 });

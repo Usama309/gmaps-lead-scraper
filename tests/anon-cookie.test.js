@@ -8,6 +8,7 @@ import {
   removeAnonCookieRule,
   ACCOUNT_COOKIE_NAMES,
 } from '../src/sources/anon-cookie.js';
+import { buildSearchUrl } from '../src/sources/google-payload.js';
 import { CONFIG } from '../src/core/config.js';
 
 const NID = { name: 'NID', value: '533=abc123' };
@@ -107,11 +108,44 @@ test('the rule is scoped to the Google search endpoint and to our own marker', (
   assert.match(filter, /mpsrc=1/, 'rule must require our own request marker');
 });
 
-test('the marker the rule matches is the marker the request writes', () => {
-  // Two halves in different files. If they ever disagree the rule matches nothing,
-  // the cookie never travels, and the run dies on a canary error that blames Google.
+test('the URL the harvester actually builds carries the marker', () => {
+  // The end-to-end gap. The previous version of this test compared buildRule()
+  // against markerParam(), both read from the same config object, so deleting the
+  // one line in google-payload.js that writes the marker left all 287 tests green
+  // while the cookie silently stopped travelling and every run died blaming Google
+  // for payload drift. This asserts the REQUEST, which is the thing that can drift.
+  const url = buildSearchUrl({ query: 'dentist', pb: '!1sdentist' });
   const { name, value } = markerParam();
-  assert.ok(buildRule('NID=x').condition.urlFilter.includes(`${name}=${value}`));
+  assert.equal(url.searchParams.get(name), value,
+    'the request must carry the marker the cookie rule matches on');
+});
+
+test('the DNR rule pattern matches the URL the harvester builds', () => {
+  // Chrome's urlFilter grammar treats only *, |, || and ^ as constructs; ? is a
+  // literal. Translating the pattern faithfully is the only way to check the two
+  // halves agree without a browser.
+  const url = buildSearchUrl({ query: 'dentist in Attock', pb: '!1sx!8i0' });
+  const filter = buildRule('NID=x').condition.urlFilter;
+
+  assert.ok(filter.startsWith('||'), 'expected a host-anchored pattern');
+  const [literalPrefix, ...rest] = filter.slice(2).split('*');
+  assert.ok(url.href.includes(literalPrefix),
+    `pattern prefix ${literalPrefix} is absent from ${url.href}`);
+  let cursor = url.href.indexOf(literalPrefix) + literalPrefix.length;
+  for (const chunk of rest) {
+    const found = url.href.indexOf(chunk, cursor);
+    assert.notEqual(found, -1, `pattern chunk ${chunk} is absent from ${url.href}`);
+    cursor = found + chunk.length;
+  }
+});
+
+test('the endpoint has one source of truth, shared by the request and the rule', () => {
+  // Two separate literals decided whether the cookie travelled. Changing either
+  // silently made the rule match nothing.
+  const url = buildSearchUrl({ query: 'x', pb: 'y' });
+  const filter = buildRule('NID=x').condition.urlFilter;
+  assert.ok(filter.includes(new URL(CONFIG.googleSearchUrl).host));
+  assert.equal(url.origin + url.pathname, CONFIG.googleSearchUrl);
 });
 
 test('a request without our marker does not match the rule', () => {

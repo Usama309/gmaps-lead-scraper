@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Fixed
+- [2026-07-31 12:30 AM] Second adversarial review found five blockers, all fixed. The worst was mine:
+  the ambiguity check I added to the canary raised a PROBLEM, and `canary_failed` halts the whole
+  job, so a single six-record outer tile of a rural run aborted a sixty-leg harvest. Ambiguity is now
+  a warning on a separate channel, gated at the small-page threshold so a four-record page is no
+  longer a blind spot
+- [2026-07-31 12:30 AM] The marker that scopes the cookie rule had no end-to-end test: deleting the
+  only line that writes it left all 287 tests green while the cookie silently stopped travelling
+- [2026-07-31 12:30 AM] The reviewCount integer check, which actually carries swap detection, could
+  be deleted with the suite still green, because the test matched a string the ambiguity message also
+  contained
+- [2026-07-31 12:30 AM] The runtime-slots markup test named `e-count` in its pattern but could never
+  match it, and a `length >= 5` assertion masked the miss
+- [2026-07-31 12:30 AM] The search endpoint was two literals in two files, either of which silently
+  made the cookie rule match nothing; now one value in config
+- [2026-07-31 12:30 AM] `hiddenAsDuplicates` counted every exported lead rather than the ones the
+  toggle alone hid, so two numbers on the same readout could not be reconciled
 - [2026-07-30 11:40 PM] Adversarial review of the live-run fixes found six blockers, all fixed:
   a swap of rating and reviewCount went undetected in a thin market (whole-number ratings defeat
   the integer check, so the sample-level ambiguity check replaces it); the cookie rule's scope was

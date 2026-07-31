@@ -287,11 +287,15 @@ function distanceKm(a, b) {
  */
 export function runCanary(parsed, expect = {}) {
   const problems = [];
+  // Kept separate from problems on purpose. A problem means the payload is wrong and
+  // the run must stop; a warning means one thing could not be confirmed from this
+  // page. Collapsing the two made an unreadable page abort a sixty-leg job.
+  const warnings = [];
   const container = at(parsed, PAYLOAD_MAP.records);
 
   if (!Array.isArray(container) || container.length === 0) {
     problems.push(`no records found at index path [${PAYLOAD_MAP.records}]`);
-    return { ok: false, problems, sampled: 0 };
+    return { ok: false, problems, warnings, sampled: 0 };
   }
 
   const records = [];
@@ -302,7 +306,7 @@ export function runCanary(parsed, expect = {}) {
 
   if (records.length === 0) {
     problems.push(`no records found at wrapper index ${PAYLOAD_MAP.recordWrapper}`);
-    return { ok: false, problems, sampled: 0 };
+    return { ok: false, problems, warnings, sampled: 0 };
   }
 
   const judgeCoverage = records.length >= CANARY_RULES.minRecordsToJudgeCoverage;
@@ -365,29 +369,45 @@ export function runCanary(parsed, expect = {}) {
     }
   }
 
-  // Sample-level swap check. See the note beside swapCeiling for why this is not a
-  // per-record ordering test and not absent altogether.
-  if (judgeCoverage) {
-    const paired = records
-      .map((r) => ({
-        rating: at(r, PAYLOAD_MAP.record.rating),
-        reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
-      }))
-      .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
+  const paired = records
+    .map((r) => ({
+      rating: at(r, PAYLOAD_MAP.record.rating),
+      reviewCount: at(r, PAYLOAD_MAP.record.reviewCount),
+    }))
+    .filter((v) => typeof v.rating === 'number' && typeof v.reviewCount === 'number');
 
-    const ambiguous = paired.length > 0
-      && paired.every((v) => v.reviewCount <= CANARY_RULES.swapCeiling)
-      && paired.every((v) => Number.isInteger(v.rating));
-
-    if (ambiguous) {
-      problems.push(
-        `every one of ${paired.length} records has a whole-number rating and no more than `
-        + `${CANARY_RULES.swapCeiling} reviews, so rating at [${PAYLOAD_MAP.record.rating}] and `
-        + `reviewCount at [${PAYLOAD_MAP.record.reviewCount}] cannot be told apart. Either those `
-        + 'indices have swapped, or this really is a market of brand new listings. We cannot '
-        + 'distinguish the two, so the numbers are not safe to score on'
-      );
-    }
+  // Sample-level ambiguity notice. A WARNING, never a problem, and the distinction
+  // is the whole point.
+  //
+  // An earlier version of this raised a problem, which meant `canary_failed`, which
+  // is a HALTING reason. That killed the entire job on the first page of any leg
+  // whose sample happened to be all new listings. A six-record outer tile of a rural
+  // run does exactly that, and rural thin markets are what this product sells into,
+  // so one unlucky tile aborted a sixty-leg run.
+  //
+  // Ambiguity is not evidence of drift. It is the absence of evidence either way:
+  // ratings cap at 5, so when every count is also at or below 5 and every rating is a
+  // whole number, the two columns are literally interchangeable and NO rule can read
+  // them apart. Halting on that punishes the operator for a thin market.
+  //
+  // Real drift still halts, through the per-field validators, and they are strictly
+  // better at it: a swap puts a count above 5 into the rating slot (range check) or a
+  // fractional rating into the count slot (integer check). Both are problems. Only
+  // the genuinely unreadable case lands here, and it is reported rather than acted on.
+  // Gated at the SMALL-page threshold, not the coverage one. Using the coverage gate
+  // of 5 reintroduced exactly the blind spot this file closed for total field loss: a
+  // four-record page could be fully transposed and say nothing at all. A warning on a
+  // small sample costs the operator a line of text and nothing else.
+  if (paired.length >= CANARY_RULES.minRecordsToRequireAnyValid
+    && paired.every((v) => v.reviewCount <= CANARY_RULES.swapCeiling)
+    && paired.every((v) => Number.isInteger(v.rating))) {
+    warnings.push(
+      `all ${paired.length} records on this page have a whole-number rating and no more than `
+      + `${CANARY_RULES.swapCeiling} reviews, so rating at [${PAYLOAD_MAP.record.rating}] and `
+      + `reviewCount at [${PAYLOAD_MAP.record.reviewCount}] cannot be told apart on this page `
+      + 'alone. Harvesting continues, because a market of brand new listings looks exactly like '
+      + 'this and is the far likelier explanation'
+    );
   }
 
   // Cross-field collision sweep. Enumerating "name must differ from address" only
@@ -451,6 +471,7 @@ export function runCanary(parsed, expect = {}) {
   return {
     ok: problems.length === 0,
     problems,
+    warnings,
     sampled: records.length,
     coverageJudged: judgeCoverage,
     proximityJudged,

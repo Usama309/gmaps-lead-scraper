@@ -75,7 +75,7 @@ function renderRows(leads) {
   }).join('');
 }
 
-function renderStats(leads, totalStored, hiddenAsDuplicates) {
+function renderStats(leads, totalStored, hiddenAsDuplicates = 0) {
   const scores = leads.map((l) => l.score).sort((a, b) => a - b);
   const median = scores.length
     ? (scores.length % 2
