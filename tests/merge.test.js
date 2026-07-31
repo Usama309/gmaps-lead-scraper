@@ -124,3 +124,48 @@ test('merging is pure and mutates neither argument', () => {
   assert.equal(JSON.stringify(existing), a);
   assert.equal(JSON.stringify(incoming), b);
 });
+
+test('a platform read from a page too thin to judge is still kept', () => {
+  // Found at the boundary between enrich.js and schema.js, where no single-module
+  // review could see it. A client-rendered site returns 200 and a kilobyte of shell,
+  // so enrichment reports `enriched: false` on purpose: an ABSENT booking widget in
+  // markup nobody could read proves nothing. But the platform IS readable there, off
+  // the script tag.
+  //
+  // Gating that on `enriched` dropped it, and the cost was backwards: the lead kept
+  // websiteTech null, scored as `unknown` for 12 points instead of `modern` for 5,
+  // and so read as a BETTER prospect than it is. It also never persisted, so every
+  // later run refetched the same site to lose the same answer again.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'SmileCraft', website: 'https://smilecraft.example' });
+  const shell = {
+    ...stored,
+    inspected: true,      // we fetched and read a body
+    enriched: false,      // but it was too thin for an absence to mean anything
+    websiteTech: 'next',
+    hasBooking: null, hasChatbot: null, mobileFriendly: null,
+    email: 'hi@smilecraft.example', socials: ['instagram'],
+  };
+
+  const merged = mergeLead(stored, shell);
+  assert.equal(merged.websiteTech, 'next', 'a platform read off a shell must persist');
+  assert.equal(merged.email, 'hi@smilecraft.example', 'a mailto is real at any page size');
+  assert.deepEqual(merged.socials, ['instagram']);
+  assert.equal(merged.enriched, false, 'the lead stays provisional, because absence was never established');
+  assert.equal(merged.hasBooking, null, 'and an unread absence must NOT become a confident false');
+});
+
+test('a transient fetch failure cannot clear a platform found earlier', () => {
+  // The unexplained-failure patch carries inspected:false precisely so this holds.
+  // Without it, one network blip would erase enrichment already paid for.
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'Clinic', website: 'https://clinic.pk',
+    enriched: true, websiteTech: 'wordpress', mobileFriendly: false,
+  });
+  const failed = {
+    ...stored, inspected: false, enriched: false, websiteTech: null,
+    mobileFriendly: null, hasBooking: null, hasChatbot: null, email: null, socials: [],
+  };
+  const merged = mergeLead(stored, failed);
+  assert.equal(merged.websiteTech, 'wordpress');
+  assert.equal(merged.mobileFriendly, false);
+});

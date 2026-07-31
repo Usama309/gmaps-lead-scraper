@@ -3,7 +3,10 @@
 ## [Unreleased]
 
 ### Added
-- [2026-07-31 02:30 AM] Phase 2 begins. `src/core/fingerprints.js`: platform, chatbot, booking, social
+- [2026-07-31 03:15 AM] Enrichment wiring: `ENRICH` / `ENRICH_PROGRESS` / `ABORT_ENRICH`, a separate
+  concurrency slot from harvest, throttling between fetches, and the domain cache actually consulted
+  so two leads sharing a host cost one fetch
+- [2026-07-31 03:15 AM] Phase 2 begins. `src/core/fingerprints.js`: platform, chatbot, booking, social
   and mobile-friendliness detectors, matching raw markup because the MV3 worker has no DOMParser
 - [2026-07-31 02:30 AM] `src/pipeline/enrich.js`: `scanHtml` (pure) plus `enrichOne` / `enrichLeads`.
   A dead domain is a 35-point scoring signal rather than an error; an UNEXPLAINED failure leaves the
@@ -15,6 +18,11 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 03:15 AM] A platform detected on a client-rendered page was silently discarded at the
+  enrich/schema boundary: `mergeLead` gated every positive finding on `enriched`, which enrichment
+  deliberately leaves false for a page too thin to judge an absence. A Next or React site therefore
+  kept websiteTech null, scored as `unknown` for 12 points instead of `modern` for 5, and so read as
+  a BETTER lead than it is, while never persisting so every later run refetched it
 - [2026-07-31 01:30 AM] Third review, three blockers, all from one root cause I introduced: canary
   notices were merged into `problems`. `completed_with_errors` keys off that array, and FIRST-RUN.md
   defines it as "at least one query failed, the list is incomplete", so every thin-market run was

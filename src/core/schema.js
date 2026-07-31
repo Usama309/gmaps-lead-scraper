@@ -163,21 +163,66 @@ export function mergeLead(existing, incoming) {
     merged.websiteTech = derived.websiteTech;
   }
 
-  // Enrichment only flows in from a record that was actually enriched.
+  // POSITIVE findings survive an incomplete enrichment, and this distinction is
+  // load-bearing rather than a nicety.
+  //
+  // A client-rendered site returns HTTP 200 and a kilobyte of shell whose content
+  // never reaches the raw HTML. Enrichment deliberately reports `enriched: false`
+  // there, because the ABSENCE of a booking widget in markup we could not read is
+  // not evidence of anything. But the platform IS readable in that same shell, off
+  // the script tag, and a `mailto:` in it is a real address.
+  //
+  // Gating those on `enriched` dropped them: a Next or React site kept
+  // `websiteTech: null`, scored as `unknown` for 12 points instead of `modern` for
+  // 5, and so read as a BETTER lead than it is. It also never persisted, so every
+  // later run re-fetched the same site to lose the same answer again.
+  // The gate is "did this record actually look at the site", which is WIDER than
+  // `enriched`. `inspected` is set only by enrichment, and only when a body was
+  // read, so it admits the thin-shell case: a client-rendered page returns 200 and a
+  // kilobyte of markup, so `enriched` is false because an ABSENT booking widget
+  // proves nothing there, but the platform is still readable off the script tag and
+  // a mailto in it is still a real address.
+  //
+  // Gating those on `enriched` dropped them, and it was not cosmetic: a Next or
+  // React site kept `websiteTech: null`, scored as `unknown` for 12 points instead
+  // of `modern` for 5, and so read as a BETTER lead than it is. It also never
+  // persisted, so every later run re-fetched the same site to lose the same answer.
+  //
+  // What this must still exclude is a plain harvest record, whose websiteTech is
+  // DERIVED from its URL rather than observed. Accepting that would let a leg
+  // returning no website clear a platform already identified.
+  const looked = incoming.inspected === true || incoming.enriched === true;
+
+  if (looked) {
+    // Only websiteTech carries the extra hasRealWebsite condition, because it is the
+    // one field makeLead synthesises from the URL. An email or a social link is
+    // always an observation, never a derivation.
+    //
+    // No `!websiteChanged` guard: the block above already reset a stale platform
+    // when the website moved, and this record observed the website it is reporting.
+    // Guarded on INCOMING.hasRealWebsite, not the merged value. A record with no
+    // website reports websiteTech 'none' by construction rather than by observation,
+    // and accepting that against a stored URL is precisely the silent erasure this
+    // function exists to prevent.
+    if (!isEmpty(incoming.websiteTech) && incoming.hasRealWebsite && merged.hasRealWebsite) {
+      merged.websiteTech = incoming.websiteTech;
+    }
+    if (!isEmpty(incoming.email)) merged.email = incoming.email;
+
+    const incomingSocials = Array.isArray(incoming.socials) ? incoming.socials : [];
+    if (incomingSocials.length > 0) {
+      merged.socials = [...new Set([...(existing.socials ?? []), ...incomingSocials])];
+    }
+  }
+
+  // Everything else waits for a record that was actually enriched, because the rest
+  // of the enrichment fields are booleans whose `false` means "looked and absent".
+  // Accepting those from an unreadable page would assert a fact nobody established.
   if (incoming.enriched) {
     merged.enriched = true;
     for (const field of ENRICHMENT_FIELDS) {
       if (!isEmpty(incoming[field])) merged[field] = incoming[field];
     }
-
-    // Only accept a platform reading from a record that actually had a site to
-    // read. See the note on ENRICHMENT_FIELDS above.
-    if (incoming.hasRealWebsite && !isEmpty(incoming.websiteTech)) {
-      merged.websiteTech = incoming.websiteTech;
-    }
-
-    const incomingSocials = Array.isArray(incoming.socials) ? incoming.socials : [];
-    merged.socials = [...new Set([...(existing.socials ?? []), ...incomingSocials])];
   }
 
   return merged;

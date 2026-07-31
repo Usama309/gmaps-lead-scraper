@@ -112,6 +112,11 @@ export function scanHtml(html) {
   const readable = bytes >= CONFIG.enrich.minUsefulHtmlBytes;
 
   return {
+    // We fetched this site and read a body. Distinct from `enriched`, which is only
+    // true once there was enough markup for an ABSENT signal to mean anything.
+    // mergeLead uses this to accept positive findings, such as the platform read off
+    // a script tag, from a page that was otherwise too thin to judge.
+    inspected: true,
     enriched: readable,
     websiteTech: detectTech(text),
     mobileFriendly: readable ? detectMobileFriendly(text) : null,
@@ -129,6 +134,7 @@ export function scanHtml(html) {
  */
 function deadPatch() {
   return {
+    inspected: true,
     enriched: true, websiteTech: 'dead',
     mobileFriendly: null, hasBooking: null, hasChatbot: null, email: null, socials: [],
   };
@@ -143,6 +149,9 @@ function deadPatch() {
  */
 function unexplainedPatch() {
   return {
+    // Nothing was learned, so nothing may be accepted. This is the flag that stops a
+    // transient network fault clearing a platform identified on an earlier run.
+    inspected: false,
     enriched: false, websiteTech: null,
     mobileFriendly: null, hasBooking: null, hasChatbot: null, email: null, socials: [],
   };

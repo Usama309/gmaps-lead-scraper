@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { scanHtml, enrichOne, enrichLeads } from '../src/pipeline/enrich.js';
-import { makeLead } from '../src/core/schema.js';
+import { makeLead, mergeLead } from '../src/core/schema.js';
 
 /**
  * A page with enough markup to clear CONFIG.enrich.minUsefulHtmlBytes, so the
@@ -418,4 +418,43 @@ test('ABORT_ENRICH stops activeEnrich, independently of ABORT_RUN', async () => 
   assert.match(body, /activeEnrich\.controller\.abort\(\)/);
   assert.doesNotMatch(body, /activeRun\.controller\.abort\(\)/,
     'ABORT_ENRICH must stop the enrichment controller, not the harvest one');
+});
+
+test('a real unexplained failure, merged, cannot clear a platform found earlier', () => {
+  // Driven through enrichOne rather than a hand-built patch, so the PRODUCER is what
+  // is under test and not just the merge rule.
+  //
+  // Worth stating plainly: flipping unexplainedPatch to `inspected: true` does NOT
+  // fail this test, and that is not a hole. The unexplained patch carries no values
+  // at all, so `isEmpty` already blocks every field regardless of the flag. The
+  // guarantee rests on the empty patch; `inspected: false` is belt and braces that
+  // keeps the intent legible if someone later gives that patch a value.
+  const stored = makeLead({
+    cid: '0xa:0xb', name: 'Clinic', website: 'https://clinic.pk',
+    enriched: true, websiteTech: 'wordpress', mobileFriendly: false,
+  });
+
+  return enrichOne({
+    lead: stored,
+    fetchPage: async () => { throw Object.assign(new Error('???'), { name: 'WeirdError' }); },
+  }).then((patch) => {
+    const merged = mergeLead(stored, { ...stored, ...patch });
+    assert.equal(merged.websiteTech, 'wordpress',
+      'a failure we cannot explain must leave the known platform alone');
+    assert.equal(merged.mobileFriendly, false, 'and must not clear other enrichment either');
+  });
+});
+
+test('a real dead domain, merged, DOES record the scoring signal', () => {
+  // The other direction, so the test above cannot be satisfied by refusing
+  // everything. A domain that genuinely does not resolve is worth 35 points.
+  const stored = makeLead({ cid: '0xa:0xb', name: 'Clinic', website: 'https://clinic.pk' });
+  return enrichOne({
+    lead: stored,
+    fetchPage: async () => { throw Object.assign(new Error('dns'), { name: 'TypeError' }); },
+  }).then((patch) => {
+    const merged = mergeLead(stored, { ...stored, ...patch });
+    assert.equal(merged.websiteTech, 'dead');
+    assert.equal(merged.enriched, true);
+  });
 });
