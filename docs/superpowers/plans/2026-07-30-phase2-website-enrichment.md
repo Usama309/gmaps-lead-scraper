@@ -184,7 +184,16 @@ git commit -m "feat: website fingerprint tables and detectors"
 
 ---
 
-## Task 2: The domain cache
+## Task 2: The domain cache — ALREADY DONE IN PHASE 1
+
+Verified 2026-07-31: `getDomainCache` and `putDomainCache` already exist in
+`src/store/db.js`, keyed by domain, honouring `CONFIG.enrich.domainCacheTtlDays`, and
+already guard the two traps this task would have specified: a corrupt timestamp
+parses to NaN and every comparison against NaN is false, so a stale row would read as
+permanently fresh, and a future-dated row means the clock moved. Both read as a miss.
+`tests/db.test.js` covers hit, miss and stale. Nothing to build.
+
+## Task 2 (original text, kept for the record)
 
 **Files:**
 - Modify: `src/store/db.js`, `src/core/config.js` (only if a tunable is missing)
