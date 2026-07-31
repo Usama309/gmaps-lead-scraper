@@ -30,4 +30,5 @@ awaits the live-run verification in Step 7 before Phase 1 can be called done end
 ## Phase 1 sign-off
 - [x] Task 14 Step 7: live end-to-end verification in Chrome (completed 2026-07-30)
 - [x] Fix the four defects the live run exposed (completed 2026-07-30)
-- [ ] Re-review the live-run fixes adversarially before merging the branch
+- [x] Re-review the live-run fixes adversarially (completed 2026-07-30; 6 blockers found and fixed)
+- [ ] Second adversarial review of the review-round fixes, then merge
