@@ -11,7 +11,13 @@
   to Google widening a thin search, but an early-stop heuristic would cut it.
 - The extension must be reloaded after any code change AND the Maps tab reloaded afterwards, because
   `chrome.storage.session` is cleared on extension reload and takes the captured pb with it. Starting
-  a run in that window fails with "no search parameters captured yet". Cosmetic, but confusing.
+  a run in that window fails with "no search parameters captured yet". The side panel now shows a
+  live capture-status pill and an "Open Maps" button, so this state is visible and one-click to fix
+  rather than a silent failure at Start harvest, but the underlying reload requirement stands.
+- The place search's top hit can be a prominent POI rather than the settlement centre for some
+  queries (measured: "Austin, Texas" resolved to the University of Texas at Austin, about 2 km off
+  the city centre). Within a normal radius it is harmless; a more specific query ("Austin city, TX")
+  or raw lat/lng avoids it. Biasing Photon toward `place`-type results is a candidate refinement.
 - The payload canary's field-collision sweep is anchored on `return finish(` and on literal
   arguments, so a comment containing that exact string, or a call passing a variable, would not be
   counted. Ruled acceptable: the separate `handBuilt === 0` assertion is independent of the pattern,

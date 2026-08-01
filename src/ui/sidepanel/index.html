@@ -13,20 +13,69 @@
   button { font: inherit; font-weight: 700; padding: 9px 16px; margin-top: 14px;
            border: 1px solid #0B1E22; background: #0B1E22; color: #EDF1F0; cursor: pointer; }
   button.secondary { background: transparent; color: #0B1E22; margin-left: 6px; }
+  button.inline { margin-top: 0; padding: 6px 12px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .options { margin: 6px 0 2px; border: 1px solid #C7D5D2; background: #F8FBFA; }
+  .options button {
+    display: block; width: 100%; text-align: left; margin: 0; padding: 7px 9px;
+    background: transparent; color: #0B1E22; border: 0;
+    border-bottom: 1px solid #DBE5E3; font: inherit; font-weight: 400; cursor: pointer;
+  }
+  .options button:last-child { border-bottom: 0; }
+  .options button:hover, .options button:focus-visible { background: #E2EAE8; }
+  .options .kind { font-size: 10.5px; color: #71847F; margin-left: 6px; }
   #log { margin-top: 14px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
          white-space: pre-wrap; color: #465A56; max-height: 300px; overflow-y: auto; }
   .warn { color: #9C3B18; font-weight: 600; }
+  .row { display: flex; gap: 6px; align-items: stretch; }
+  .row input { flex: 1; }
+  .hint { font-size: 11px; color: #5A6E6A; margin: 5px 0 2px; min-height: 14px; }
+  /* Capture-status pill. The harvest silently needs a pb captured from a live Maps
+     search; making that state visible is the whole point of this block. */
+  .capture { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px;
+             padding: 8px 10px; border: 1px solid #C7D5D2; border-radius: 6px;
+             background: #F8FBFA; font-size: 11px; }
+  .capture .dot { width: 8px; height: 8px; border-radius: 50%; background: #B8863B; flex: none; }
+  .capture.ready .dot { background: #2E7D57; }
+  .capture .msg { flex: 1; color: #465A56; }
+  .capture.ready .msg { color: #1F5E42; }
   @media (prefers-color-scheme: dark) {
     body { background: #07161A; color: #E7F0EE; }
     input, select { background: #0C2025; border-color: #1D383D; color: #E7F0EE; }
     button { background: #E7F0EE; color: #07161A; border-color: #E7F0EE; }
-    button.secondary { background: transparent; color: #E7F0EE; }
+    button.secondary { background: transparent; color: #E7F0EE; border-color: #2A474C; }
     #log { color: #9DB2AE; }
+    .options { background: #0C2025; border-color: #1D383D; }
+    .options button { color: #E7F0EE; border-bottom-color: #152C31; }
+    .options button:hover, .options button:focus-visible { background: #112B31; }
+    .options .kind { color: #6C837E; }
+    .hint { color: #8AA09B; }
+    .capture { background: #0C2025; border-color: #1D383D; }
+    .capture .msg { color: #9DB2AE; }
+    .capture.ready .msg { color: #7FD3AC; }
+    .capture .dot { background: #C79A4E; }
+    .capture.ready .dot { background: #46B788; }
   }
 </style>
 </head>
 <body>
   <h1>MapProspector</h1>
+
+  <!-- Whether a Maps search has been captured. Updated live from session storage. -->
+  <div id="capture" class="capture">
+    <span class="dot"></span>
+    <span class="msg" id="captureMsg">checking...</span>
+    <button id="capOpen" class="secondary inline">Open Maps</button>
+  </div>
+
+  <label for="place">Place, or paste a Google Maps link</label>
+  <div class="row">
+    <input id="place" placeholder="Kansas City, US  or  paste a maps.google link" autocomplete="off">
+    <button id="find" class="secondary inline">Find</button>
+  </div>
+  <div id="placeHint" class="hint"></div>
+  <div id="placeOptions" class="options" hidden></div>
+
   <label for="kw">Keywords, comma separated</label>
   <input id="kw" value="dentist, dental clinic">
   <label for="lat">Latitude</label>

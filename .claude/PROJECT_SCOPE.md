@@ -20,7 +20,9 @@ tasks implemented). The pipeline runs harvest -> filter -> score -> export end t
 - `src/ui/dashboard/index.html` + `dashboard.js` render the filter rail and lead table from
   real data (`MSG.GET_LEADS`), re-filtering locally on every rail change with no network call
 - `src/ui/sidepanel/index.html` + `sidepanel.js` start/stop a harvest and surface COVERAGE CUT
-  warnings when the tile cap or leg cap truncates the area actually searched
+  warnings when the tile cap or leg cap truncates the area actually searched. A "City or place"
+  field geocodes a name to lat/lng via `src/ui/sidepanel/geocode.js` (Photon), and a capture-status
+  pill shows live whether a Maps `pb` exists, with an "Open Maps" button to capture one in a click
 
 **Verified live in Chrome on 2026-07-30.** Task 14 Step 7 has been performed. The extension loads
 with zero manifest, runtime or install errors under the pinned ID `ghnhjhnldonkhjojmclnimghpcgocmce`,

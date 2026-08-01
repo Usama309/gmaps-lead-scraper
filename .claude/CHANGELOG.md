@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- [2026-07-31 02:16 PM] Side panel place search: a "City or place" field that resolves a name like
+  "Kansas City, US" to latitude/longitude via Photon (keyless, CORS-friendly OSM geocoder), so the
+  operator never hand-looks-up coordinates. New `src/ui/sidepanel/geocode.js` (pure, injectable
+  fetch) plus `tests/geocode.test.js`. The lat/lng fields stay editable for raw entry.
+- [2026-07-31 02:16 PM] Side panel capture-status pill: shows live whether a Maps `pb` has been
+  captured, and an "Open Maps" button that opens a search seeded with the operator's keyword and
+  place so capturing one is one click rather than a hunt. Makes the "no search parameters captured
+  yet" failure visible before Start harvest instead of after.
 - [2026-07-31 07:00 AM] Phase 3 Task 4: the review pass is wired end to end. `scripting` permission,
   a reusable background tab, `REVIEW_PASS` / `REVIEW_PASS_PROGRESS` / `ABORT_REVIEW_PASS` /
   `REVIEW_PASS_ESTIMATE`, and a dashboard control that states the cost in minutes BEFORE it starts,

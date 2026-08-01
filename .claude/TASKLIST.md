@@ -33,4 +33,11 @@ awaits the live-run verification in Step 7 before Phase 1 can be called done end
 - [x] Re-review the live-run fixes adversarially (completed 2026-07-30; 6 blockers found and fixed)
 - [x] Second adversarial review (completed 2026-07-30; 5 blockers found and fixed)
 - [x] Third scoped re-review (completed 2026-07-31; 3 blockers + 5 important, all fixed)
+
+## Usability
+- [x] Side panel place search + capture-status pill (completed 2026-07-31): "City or place" field
+  geocodes a name to lat/lng via Photon so the operator stops hand-entering coordinates, and the
+  capture-status pill + "Open Maps" button make the pb-capture prerequisite visible instead of a
+  silent failure at Start harvest. New geocode.js + tests/geocode.test.js; full suite 421/421.
+
 - [ ] Phase 2: website enrichment, per docs/superpowers/plans/2026-07-30-phase2-website-enrichment.md

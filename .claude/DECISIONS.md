@@ -200,3 +200,42 @@ integer check carries swap detection" was also false: that test asserted only th
 mentioning `reviewCount` was raised, and the ambiguity message contains that word too, so deleting
 `Number.isInteger` left the suite green. There is now a test that asserts the integer check produces
 a "wrong shape" problem specifically, and it fails when the check is weakened.
+
+## ADR-007: Photon for place-name geocoding, not Nominatim
+**Date:** 2026-07-31
+**Decision:** Resolve the side panel's "City or place" field through Photon
+(photon.komoot.io), not OpenStreetMap's own Nominatim.
+**Why:** The operator asked to enter a place by name (e.g. "Kansas City, US") instead of
+raw coordinates. Nominatim rejects a browser `fetch` with HTTP 403 unless the request
+carries an app-identifying User-Agent, and a page cannot set that header (it is
+forbidden). Verified live on 2026-07-31: Nominatim returned 403, Photon returned 200 for
+the same query. Photon is keyless, CORS-enabled, OSM-based, and built for autocomplete.
+**Consequence:** One external dependency for the lookup, called once per Find click, not
+on a loop. `credentials: 'omit'` is carried through so no account is attached, consistent
+with ADR-002. Photon's top hit is occasionally a prominent POI rather than the settlement
+centre; noted in KNOWN_ISSUES.
+
+## Place lookup does not use Google, because Google cannot answer it
+**Date:** 2026-07-31
+
+The obvious source for "find this place" is Google, since the extension already talks
+to its map endpoint and already has the cookie machinery. Measured before building:
+querying that endpoint for `Attock`, `Kansas City` and `Lahore` returned **zero
+records each**. It is a business search, not a gazetteer, so it cannot list localities
+at all.
+
+Photon (photon.komoot.io) is used instead: free, keyless, CORS-enabled, OSM-backed.
+Nominatim was rejected because it answers a browser fetch with HTTP 403 unless the
+request carries an app User-Agent, and a page cannot set that header.
+
+The stronger path needs no geocoder at all. A pasted Google Maps URL carries the map
+centre in its own path as `@lat,lng,zoom`, so pasting a link the operator is already
+looking at is exact, instant, offline, and free of any question about which Kansas
+City was meant. That is the recommended route, and the typed-name lookup is the
+fallback rather than the other way round.
+
+Both refuse to guess. A pasted link whose coordinates fall outside real latitude or
+longitude ranges is rejected rather than written into the form, because a latitude of
+400 fails much later with a message about tiling that says nothing about the link that
+caused it. And a typed name that matches several places shows all of them with their
+kind, so an airport is distinguishable from a city at a glance.
