@@ -55,6 +55,30 @@ export function setPbCentre(pb, { lat, lng }) {
 }
 
 /**
+ * Where the captured search was actually centred.
+ *
+ * A pb is not a neutral template. Besides the coordinates it carries a session token
+ * at a second `!1s` field, bound to the search it came from, and that token keeps
+ * pulling results back toward the original area no matter how carefully the
+ * coordinates and the query are rewritten.
+ *
+ * Measured 2026-07-31: a pb captured in Attock, fully retargeted to Kansas City,
+ * harvested 67 genuine Kansas City businesses on the centre tile and then began
+ * mixing in Pakistani clinics 11,835 km away on the offset tiles.
+ *
+ * So this exists to let the caller SAY SO before spending a run, rather than leaving
+ * the canary to abort halfway with a message about coordinate drift. Returns null
+ * when the pb carries no centre, which is not an error, only unknowable.
+ */
+export function pbOrigin(pb) {
+  const lng = /!2d(-?[\d.]+)/.exec(String(pb ?? ''));
+  const lat = /!3d(-?[\d.]+)/.exec(String(pb ?? ''));
+  if (!lat || !lng) return null;
+  const out = { lat: Number(lat[1]), lng: Number(lng[1]) };
+  return Number.isFinite(out.lat) && Number.isFinite(out.lng) ? out : null;
+}
+
+/**
  * Substitute the search term into a captured pb blob.
  *
  * The pb opens with `!1s<the query the operator typed into Maps>`, and that text is

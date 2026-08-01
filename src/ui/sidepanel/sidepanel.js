@@ -1,5 +1,26 @@
 import { MSG, makeRequest } from '../../core/messages.js';
 import { parseMapsUrl, searchPlaces } from './geocode.js';
+import { pbOrigin } from '../../sources/google-payload.js';
+import { haversineKm } from '../../pipeline/tiling.js';
+import { CONFIG } from '../../core/config.js';
+
+/**
+ * The location the harvest will use.
+ *
+ * Named searchArea rather than the obvious `location`, which would shadow the global
+ * `window.location` for this whole module and break anything that later reaches for
+ * it, in a way that reads as correct right up until it does not.
+ *
+ * Held here rather than in two text inputs. Raw coordinates were a form the operator
+ * had to fill correctly, in the right order, for a tool whose whole job is to find
+ * them: the place box and a pasted Maps link both produce them, so typing them by
+ * hand was the one path that could put a search in the wrong hemisphere.
+ *
+ * Seeded with Attock, the operator's own market, so the panel is usable the moment it
+ * opens. Every later value comes from a resolved place or a pasted link, both of
+ * which are range checked before they get here.
+ */
+const searchArea = { lat: 33.7609824, lng: 72.342874, label: 'Attock / Hazro, PB' };
 
 const log = document.getElementById('log');
 const write = (text, warn = false) => {
@@ -18,15 +39,35 @@ runButton.addEventListener('click', async () => {
   if (runButton.disabled) return;
   runButton.disabled = true;
 
+  // A captured search belongs to the place it came from. Retargeting one across the
+  // world does not fail cleanly: it returns real businesses from the requested city
+  // AND from the captured one, which is worse than failing, because the export looks
+  // full. Checked here so the operator is told before the run rather than by a canary
+  // abort halfway through.
+  const stored = await chrome.storage.session.get('latestPb');
+  const origin = pbOrigin(stored?.latestPb);
+  if (origin) {
+    const drift = haversineKm(origin, { lat: searchArea.lat, lng: searchArea.lng });
+    if (drift > CONFIG.capture.maxDriftFromCaptureKm) {
+      write(`the captured Maps search is about ${Math.round(drift)} km from ${searchArea.label}. `
+        + 'Click Open Maps to run one search there first, then start the harvest. '
+        + 'Harvesting across that distance mixes both places into one list.', true);
+      runButton.disabled = false;
+      return;
+    }
+  }
+
   const config = {
     keywords: document.getElementById('kw').value.split(',').map((k) => k.trim()).filter(Boolean),
-    lat: Number(document.getElementById('lat').value),
-    lng: Number(document.getElementById('lng').value),
+    lat: searchArea.lat,
+    lng: searchArea.lng,
     radiusKm: Number(document.getElementById('radius').value),
     zoom: 14,
   };
 
-  write(`starting: ${config.keywords.join(', ')} within ${config.radiusKm} km`);
+  // The place is named in the log, not just the numbers. A run that searched the
+  // wrong city used to be indistinguishable from a run that found nothing.
+  write(`starting: ${config.keywords.join(', ')} within ${config.radiusKm} km of ${searchArea.label}`);
 
   let response;
   try {
@@ -67,9 +108,10 @@ const placeHint = document.getElementById('placeHint');
 
 const placeOptions = document.getElementById('placeOptions');
 
-function setCoords(lat, lng) {
-  document.getElementById('lat').value = lat;
-  document.getElementById('lng').value = lng;
+function setLocation(lat, lng, label) {
+  searchArea.lat = lat;
+  searchArea.lng = lng;
+  searchArea.label = label;
 }
 
 function clearOptions() {
@@ -96,8 +138,8 @@ function showOptions(options) {
       button.appendChild(kind);
     }
     button.addEventListener('click', () => {
-      setCoords(opt.lat, opt.lng);
-      placeHint.textContent = `set to ${opt.lat.toFixed(5)}, ${opt.lng.toFixed(5)} (${opt.label})`;
+      setLocation(opt.lat, opt.lng, opt.label);
+      placeHint.textContent = `searching ${opt.label}  (${opt.lat.toFixed(5)}, ${opt.lng.toFixed(5)})`;
       clearOptions();
     });
     placeOptions.appendChild(button);
@@ -122,10 +164,10 @@ async function findPlace() {
 
   const fromUrl = parseMapsUrl(query);
   if (fromUrl) {
-    setCoords(fromUrl.lat, fromUrl.lng);
+    setLocation(fromUrl.lat, fromUrl.lng, fromUrl.keyword ? `the ${fromUrl.keyword} link` : 'the pasted link');
     // A link copied from a search the operator already ran carries what they were
     // looking for, so offer it rather than making them type it again.
-    let note = `set to ${fromUrl.lat.toFixed(5)}, ${fromUrl.lng.toFixed(5)} from the link`;
+    let note = `searching the pasted link  (${fromUrl.lat.toFixed(5)}, ${fromUrl.lng.toFixed(5)})`;
     if (fromUrl.keyword) {
       const kwField = document.getElementById('kw');
       note += `. Keyword in that link: "${fromUrl.keyword}"`;
@@ -144,8 +186,8 @@ async function findPlace() {
     const options = await searchPlaces(query);
     if (options.length === 1) {
       const only = options[0];
-      setCoords(only.lat, only.lng);
-      placeHint.textContent = `set to ${only.lat.toFixed(5)}, ${only.lng.toFixed(5)} (${only.label})`;
+      setLocation(only.lat, only.lng, only.label);
+      placeHint.textContent = `searching ${only.label}  (${only.lat.toFixed(5)}, ${only.lng.toFixed(5)})`;
     } else {
       placeHint.textContent = `${options.length} places match. Pick one:`;
       showOptions(options);
@@ -156,6 +198,10 @@ async function findPlace() {
     findButton.disabled = false;
   }
 }
+
+// State the starting area on load. An invisible default is worse than a visible one:
+// the operator should never have to guess where a run is about to go.
+placeHint.textContent = `searching ${searchArea.label}  (${searchArea.lat.toFixed(5)}, ${searchArea.lng.toFixed(5)})`;
 
 findButton.addEventListener('click', findPlace);
 placeInput.addEventListener('keydown', (event) => {

@@ -1,6 +1,13 @@
 # Known Issues
 
 ## Open
+- A captured Maps search cannot be retargeted to a distant city. Besides the coordinates and the
+  query, a pb carries a session token bound to the search it came from, and that token keeps pulling
+  results back: an Attock capture retargeted to Kansas City returned 67 genuine Kansas City
+  businesses on the centre tile and then Pakistani clinics 11,835 km away on the offset tiles. The
+  panel now refuses this rather than producing a mixed list, and the workflow is to click Open Maps
+  so the capture comes from the area being harvested. Removing the dependency entirely would mean
+  synthesising a pb from scratch, which the spec ruled out for good reason.
 - Tiling buys very little in a thin market. Measured live at 15 km: leg 1 returned 40 businesses and
   legs 2 through 7 added two more between them, because every tile query returns much the same
   widened result set and the radius filter then keeps the same local businesses each time. A 21-leg

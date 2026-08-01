@@ -22,6 +22,16 @@ export const CONFIG = deepFreeze({
     maxLegsPerRun: 60,
   },
 
+  capture: {
+    // How far the requested search area may sit from the captured search before the
+    // panel refuses to start. A pb carries a session token bound to the search it came
+    // from, and retargeting it across that kind of distance mixes the two markets:
+    // measured, an Attock capture retargeted to Kansas City returned 67 genuine Kansas
+    // City businesses and then Pakistani clinics 11,835 km away. Generous enough that
+    // moving around one metropolitan area never trips it.
+    maxDriftFromCaptureKm: 300,
+  },
+
   tiling: {
     // Absolute distance between tile centres. This must NOT be a fraction of the
     // requested radius: ceil(radius / (radius * factor)) cancels the radius out,

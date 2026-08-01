@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { assertSource, assertStopReason, STOP_REASONS } from '../src/sources/source.js';
 import { CONFIG } from '../src/core/config.js';
-import { setPbOffset, setPbCentre, setPbQuery, googlePayloadSource } from '../src/sources/google-payload.js';
+import { setPbOffset, setPbCentre, setPbQuery, pbOrigin, googlePayloadSource } from '../src/sources/google-payload.js';
 
 const PB = '!4m12!1m3!1d5000!2d72.342874!3d33.7609824!2m3!1f0!2f0!3f0!7i20!8i0!10b1';
 
@@ -421,4 +421,33 @@ test('setPbQuery composes with setPbCentre, which is how a real leg is built', (
 test('setPbQuery refuses an empty query rather than blanking the field', () => {
   assert.throws(() => setPbQuery('!1sx!7i20', ''), /non-empty/i);
   assert.throws(() => setPbQuery('!1sx!7i20', null), /non-empty/i);
+});
+
+test('pbOrigin reports where the captured search was centred', () => {
+  // Used to warn before a run rather than let the canary abort halfway. A pb carries
+  // a session token bound to its original search, so retargeting one across the world
+  // returns real businesses from BOTH places, which is worse than failing because the
+  // export looks full.
+  const pb = '!1sdentist in Attock!4m8!1m3!1d53071.8!2d72.342874!3d33.7609824!7i20';
+  assert.deepEqual(pbOrigin(pb), { lat: 33.7609824, lng: 72.342874 });
+});
+
+test('pbOrigin handles a western hemisphere capture', () => {
+  assert.deepEqual(pbOrigin('!1sx!2d-94.9058341!3d39.0904394'), { lat: 39.0904394, lng: -94.9058341 });
+});
+
+test('pbOrigin returns null when there is no centre, which is not an error', () => {
+  assert.equal(pbOrigin('!1sdentist!7i20'), null);
+  assert.equal(pbOrigin(''), null);
+  assert.equal(pbOrigin(null), null);
+});
+
+test('the drift threshold is generous enough not to trip inside one metro', () => {
+  // Kansas City to its own outskirts is tens of km. The threshold exists to catch a
+  // capture on the wrong CONTINENT, not to police a city.
+  assert.ok(CONFIG.capture.maxDriftFromCaptureKm >= 100,
+    'a threshold this tight would fire on normal use');
+  const attockToKansasCity = 11800;
+  assert.ok(CONFIG.capture.maxDriftFromCaptureKm < attockToKansasCity,
+    'and it must still catch the case that produced a mixed list');
 });

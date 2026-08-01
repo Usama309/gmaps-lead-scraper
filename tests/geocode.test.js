@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { buildGeocodeUrl, parseGeocode, geocodePlace, MAX_PLACE_OPTIONS, parseMapsUrl, parseGeocodeOptions, searchPlaces } from '../src/ui/sidepanel/geocode.js';
 
 // A Photon hit, in the GeoJSON shape the geocoder actually receives. Coordinates are
@@ -154,4 +155,31 @@ test('searchPlaces returns the candidates on success', async () => {
   const out = await searchPlaces('Kansas City', fake);
   assert.equal(out.length, 1);
   assert.equal(out[0].lat, 39.1001);
+});
+
+test('the panel no longer exposes raw coordinate inputs', () => {
+  // Removed at the operator's request, and the reasoning is worth keeping: the whole
+  // job of this panel is to FIND coordinates, so a pair of text boxes asking for them
+  // by hand, in the right order, was the one path that could put a search in the
+  // wrong hemisphere while looking perfectly filled in.
+  const html = readFileSync(new URL('../src/ui/sidepanel/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /id="lat"/, 'the latitude input must be gone');
+  assert.doesNotMatch(html, /id="lng"/, 'the longitude input must be gone');
+  assert.match(html, /id="place"/, 'and the place box is what replaces it');
+});
+
+test('the panel still sends coordinates to the worker, from the resolved place', () => {
+  // The fields went, the values did not. planLegs cannot tile without them, and a
+  // panel that quietly sent undefined would fail deep in the pipeline with a message
+  // about tiling rather than about a missing location.
+  const js = readFileSync(new URL('../src/ui/sidepanel/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(js, /lat:\s*searchArea\.lat/);
+  assert.match(js, /lng:\s*searchArea\.lng/);
+});
+
+test('the held location is not called `location`, which would shadow the global', () => {
+  // A module-scoped `const location` shadows window.location for the whole file and
+  // breaks anything that later reaches for it, in a way that reads as correct.
+  const js = readFileSync(new URL('../src/ui/sidepanel/sidepanel.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(js, /^\s*(const|let|var)\s+location\s*=/m);
 });
