@@ -39,6 +39,13 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 06:30 PM] Open Maps built its search from the RAW text in the place box, so pasting a
+  link opened `dentist in https://www.google.com/maps/place/Kansas+City,...`. Google matched nothing,
+  so the capture came from a failed search, which is the one thing that button exists to prevent. It
+  now searches the keyword centred on the resolved coordinates
+- [2026-07-31 06:30 PM] A `/maps/place/` link had its place NAME read as a search keyword, so pasting
+  one announced `Keyword in that link: "Kansas City, MO, USA"`. Only `/maps/search/` carries a
+  keyword; a place link now yields a label, which is what names the area in the log
 - [2026-07-31 04:30 PM] Setting a location by name or by pasted link filled the form but harvested
   the WRONG CITY. Two causes, both found by testing the operator's own question. `setPbCentre`
   rewrote the viewport extent from the zoom level as `2 ** (21 - zoom) * 0.6`, giving 77 where a real

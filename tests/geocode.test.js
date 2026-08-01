@@ -68,13 +68,16 @@ test('a pasted Maps search link yields its centre and its keyword', () => {
   // are in the link, so there is no geocoder and no ambiguity about which place.
   const url = 'https://www.google.com/maps/search/dental+clinic/@39.0904394,-94.9058341,10z/data=!4m2!2m1!6e1?entry=ttu&g_ep=EgoyMDI2MDcyOS4wIKXMDSoASAFQAw%3D%3D';
   assert.deepEqual(parseMapsUrl(url), {
-    lat: 39.0904394, lng: -94.9058341, zoom: 10, keyword: 'dental clinic',
+    lat: 39.0904394, lng: -94.9058341, zoom: 10,
+    keyword: 'dental clinic', label: 'dental clinic',
   });
 });
 
 test('a place link works too, and a negative longitude survives', () => {
+  // The place NAME becomes the label, not the keyword: nobody searched for "Lahore",
+  // they are standing in it.
   assert.deepEqual(parseMapsUrl('https://www.google.com/maps/place/Lahore/@31.5204,74.3587,12z'), {
-    lat: 31.5204, lng: 74.3587, zoom: 12, keyword: 'Lahore',
+    lat: 31.5204, lng: 74.3587, zoom: 12, keyword: null, label: 'Lahore',
   });
   // The western hemisphere is where a dropped minus sign would move a search by
   // thousands of kilometres while still looking like a valid coordinate.
@@ -182,4 +185,32 @@ test('the held location is not called `location`, which would shadow the global'
   // breaks anything that later reaches for it, in a way that reads as correct.
   const js = readFileSync(new URL('../src/ui/sidepanel/sidepanel.js', import.meta.url), 'utf8');
   assert.doesNotMatch(js, /^\s*(const|let|var)\s+location\s*=/m);
+});
+
+test('A /maps/place/ LINK CARRIES A PLACE NAME, NOT A SEARCH KEYWORD', () => {
+  // The operator pasted a /place/ link and the panel told them the keyword in it was
+  // "Kansas City, MO, USA", which is the name of the city rather than anything they
+  // had searched for. Only a /search/ URL carries a search term.
+  const place = parseMapsUrl('https://www.google.com/maps/place/Kansas+City,+MO,+USA/@39.0903034,-94.9051455,10z/data=!3m1!4b1');
+  assert.equal(place.keyword, null, 'a place name is not a keyword');
+  assert.equal(place.label, 'Kansas City, MO, USA', 'but it is a perfectly good label');
+
+  const search = parseMapsUrl('https://www.google.com/maps/search/dental+clinic/@39.0904394,-94.9058341,10z');
+  assert.equal(search.keyword, 'dental clinic', 'a search URL does carry a keyword');
+  assert.equal(search.label, 'dental clinic');
+});
+
+test('OPEN MAPS SEARCHES COORDINATES, never the raw text in the box', () => {
+  // The bug the operator hit: the button built "<keyword> in <whatever is typed>",
+  // so pasting a link produced the search
+  //   dentist in https://www.google.com/maps/place/Kansas+City,+MO,+USA/@39.09...
+  // Google matched nothing, so the capture came from a FAILED search, which is the one
+  // thing this button exists to prevent.
+  const js = readFileSync(new URL('../src/ui/sidepanel/sidepanel.js', import.meta.url), 'utf8');
+  const handler = js.slice(js.indexOf("getElementById('capOpen')"));
+  const body = handler.slice(0, handler.indexOf('});'));
+  assert.doesNotMatch(body, /placeInput\.value/, 'the raw box text must never reach the Maps URL');
+  assert.match(body, /searchArea\.lat/, 'it must use the resolved coordinates');
+  assert.match(body, /searchArea\.lng/);
+  assert.match(body, /@\$\{searchArea\.lat\},\$\{searchArea\.lng\}/, 'centred, as an @lat,lng URL');
 });

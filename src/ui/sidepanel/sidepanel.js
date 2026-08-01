@@ -164,10 +164,11 @@ async function findPlace() {
 
   const fromUrl = parseMapsUrl(query);
   if (fromUrl) {
-    setLocation(fromUrl.lat, fromUrl.lng, fromUrl.keyword ? `the ${fromUrl.keyword} link` : 'the pasted link');
+    setLocation(fromUrl.lat, fromUrl.lng, fromUrl.label ?? 'the pasted link');
     // A link copied from a search the operator already ran carries what they were
     // looking for, so offer it rather than making them type it again.
-    let note = `searching the pasted link  (${fromUrl.lat.toFixed(5)}, ${fromUrl.lng.toFixed(5)})`;
+    let note = `searching ${fromUrl.label ?? 'the pasted link'}`
+      + `  (${fromUrl.lat.toFixed(5)}, ${fromUrl.lng.toFixed(5)})`;
     if (fromUrl.keyword) {
       const kwField = document.getElementById('kw');
       note += `. Keyword in that link: "${fromUrl.keyword}"`;
@@ -243,12 +244,19 @@ chrome.storage.onChanged.addListener((changes, area) => {
 refreshCapture();
 
 document.getElementById('capOpen').addEventListener('click', () => {
-  // Seed the search with the operator's first keyword and the place they typed, so
-  // the captured pb comes from the area they are about to harvest.
+  // Centred on the RESOLVED coordinates, never on the text in the box.
+  //
+  // This used to build "<keyword> in <whatever is typed>", which turned a pasted link
+  // into the search `dentist in https://www.google.com/maps/place/Kansas+City,...`.
+  // Google matched nothing, so the capture came from a failed search, which is the one
+  // thing this button exists to prevent.
+  //
+  // Coordinates also beat a place name outright: the capture lands exactly where the
+  // harvest will run, which is what the distance guard below then checks for.
   const keyword = (document.getElementById('kw').value.split(',')[0] || 'dentist').trim();
-  const place = placeInput.value.trim();
-  const query = place ? `${keyword} in ${place}` : keyword;
-  chrome.tabs.create({ url: `https://www.google.com/maps/search/${encodeURIComponent(query)}` });
+  const url = `https://www.google.com/maps/search/${encodeURIComponent(keyword)}`
+    + `/@${searchArea.lat},${searchArea.lng},13z`;
+  chrome.tabs.create({ url });
 });
 
 function writeCoverage(c) {

@@ -65,18 +65,26 @@ export function parseMapsUrl(text) {
 
   const zoom = at[3] === undefined ? null : Number(at[3]);
 
-  // /maps/search/<keyword>/@... or /maps/place/<name>/@...
-  const kw = /\/maps\/(?:search|place)\/([^/@]+)/.exec(url.pathname);
+  // A /maps/SEARCH/ URL carries a search term. A /maps/PLACE/ URL carries the name of
+  // one place. Treating both as a keyword put "Kansas City, MO, USA" into the keyword
+  // field and told the operator it was what they had been searching for.
+  const match = /\/maps\/(search|place)\/([^/@]+)/.exec(url.pathname);
   let keyword = null;
-  if (kw) {
+  let label = null;
+  if (match) {
+    let text;
     try {
-      keyword = decodeURIComponent(kw[1].replace(/\+/g, ' ')).trim() || null;
+      text = decodeURIComponent(match[2].replace(/\+/g, ' ')).trim();
     } catch {
-      keyword = kw[1].replace(/\+/g, ' ').trim() || null;
+      text = match[2].replace(/\+/g, ' ').trim();
+    }
+    if (text) {
+      label = text;
+      if (match[1] === 'search') keyword = text;
     }
   }
 
-  return { lat, lng, zoom, keyword };
+  return { lat, lng, zoom, keyword, label };
 }
 
 /** Build the lookup URL. Separated out so a test can assert it without a network call. */
