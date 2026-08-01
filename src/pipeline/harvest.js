@@ -1,6 +1,6 @@
 import { CONFIG } from '../core/config.js';
 import { planTiles, haversineKm } from './tiling.js';
-import { setPbCentre } from '../sources/google-payload.js';
+import { setPbCentre, setPbQuery } from '../sources/google-payload.js';
 import { assertSource, assertStopReason } from '../sources/source.js';
 import { nextDelayMs } from './guard.js';
 
@@ -174,7 +174,13 @@ export async function runHarvest({
     if (signal?.aborted) return finish('aborted');
 
     const leg = legs[i];
-    const legPb = setPbCentre(pb, { lat: leg.lat, lng: leg.lng, zoom: leg.zoom });
+    // BOTH the centre and the query. The pb carries the search term the operator
+    // originally typed into Maps, and Google reads it, so moving only the coordinates
+    // harvests somewhere between where you asked and wherever you last searched.
+    const legPb = setPbQuery(
+      setPbCentre(pb, { lat: leg.lat, lng: leg.lng, zoom: leg.zoom }),
+      leg.query,
+    );
 
     // The try covers the call AND the shape check, because a malformed return
     // damages exactly as much as a throw: it would discard every lead from every

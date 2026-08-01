@@ -39,6 +39,13 @@
   read. Phase 1's domain cache already satisfied the planned Task 2
 
 ### Fixed
+- [2026-07-31 04:30 PM] Setting a location by name or by pasted link filled the form but harvested
+  the WRONG CITY. Two causes, both found by testing the operator's own question. `setPbCentre`
+  rewrote the viewport extent from the zoom level as `2 ** (21 - zoom) * 0.6`, giving 77 where a real
+  13z view captures 53071.8, and that nonsensical extent made Google fall back toward whatever the pb
+  was originally captured for: harvesting Kansas City from an Attock pb returned 6 of 20 records in
+  Attock, 11,808 km away. The extent is now left as captured, 20 of 20. Separately the pb still
+  carried the ORIGINAL search term at `!1s`, which Google reads, so the query is now rewritten per leg
 - [2026-07-31 08:30 AM] The review pass recorded every business with NO reviews as a failure, because
   such a business has no Reviews tab and no sort control to click. Live failure rate 11 of 15. Worse,
   a failure leaves no read timestamp, so every later pass retried the same shop forever and it could

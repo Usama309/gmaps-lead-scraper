@@ -596,3 +596,36 @@ test('a leg returning a malformed notices field is rejected, not silently accept
   const result = await runHarvest({ legs: [legAt(0)], pb: 'pb', source, delay: async () => {} });
   assert.equal(result.stopReason, 'leg_threw');
 });
+
+test('THE HARVEST REWRITES THE PB QUERY, not just the coordinates', async () => {
+  // Driven through runHarvest, because testing setPbQuery alone leaves the harvest
+  // free to stop calling it: deleting the call left all 436 tests green.
+  //
+  // Measured live 2026-07-31. A pb captured from "dentist in Attock", re-centred on
+  // Kansas City but with its query untouched, returned only 14 of 20 records anywhere
+  // near Kansas City. The proximity canary halted a search that was half in Punjab
+  // and half in Missouri. Without this the place picker and the pasted link both fill
+  // the form correctly and then harvest somewhere in between.
+  const seen = [];
+  const source = {
+    id: 'fake',
+    harvestLeg: async ({ pb }) => {
+      seen.push(pb);
+      return { leads: [], stopReason: 'end_of_list', problems: [] };
+    },
+  };
+  const capturedPb = '!1sdentist in Attock!4m8!1m3!1d53071.8!2d72.342874!3d33.7609824!7i20';
+
+  await runHarvest({
+    legs: [{ id: 'l1', query: 'dental clinic', keyword: 'dental clinic', tileIndex: 0,
+             lat: 39.0904394, lng: -94.9058341, zoom: 14 }],
+    pb: capturedPb,
+    source,
+    delay: async () => {},
+  });
+
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /!1sdental clinic/, 'the leg must search for what the operator asked for');
+  assert.doesNotMatch(seen[0], /Attock/, 'and must not carry the place the pb was captured from');
+  assert.match(seen[0], /!3d39\.0904394/, 'while still moving the centre');
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { assertSource, assertStopReason, STOP_REASONS } from '../src/sources/source.js';
 import { CONFIG } from '../src/core/config.js';
-import { setPbOffset, setPbCentre, googlePayloadSource } from '../src/sources/google-payload.js';
+import { setPbOffset, setPbCentre, setPbQuery, googlePayloadSource } from '../src/sources/google-payload.js';
 
 const PB = '!4m12!1m3!1d5000!2d72.342874!3d33.7609824!2m3!1f0!2f0!3f0!7i20!8i0!10b1';
 
@@ -25,14 +25,32 @@ test('setPbOffset rejects a negative or non-integer offset', () => {
   assert.throws(() => setPbOffset(PB, 1.5), /offset/i);
 });
 
-test('setPbCentre substitutes latitude, longitude and zoom', () => {
-  const out = setPbCentre(PB, { lat: 31.5204, lng: 74.3587, zoom: 12 });
+test('setPbCentre substitutes latitude and longitude', () => {
+  const out = setPbCentre(PB, { lat: 31.5204, lng: 74.3587 });
   assert.match(out, /!2d74\.3587/);
   assert.match(out, /!3d31\.5204/);
 });
 
-test('setPbCentre rejects invalid coordinates', () => {
-  assert.throws(() => setPbCentre(PB, { lat: null, lng: 74, zoom: 12 }), /coordinates/i);
+test('SETPBCENTRE LEAVES THE VIEWPORT EXTENT ALONE', () => {
+  // An earlier version rewrote !1d from the zoom level as 2 ** (21 - zoom) * 0.6,
+  // which at zoom 14 gives 77 against the 53071.8 a real 13z Maps view captures: out
+  // by a factor of roughly seven hundred.
+  //
+  // Measured 2026-07-31, harvesting Kansas City from a pb captured in Attock. With
+  // the extent left alone, 20 of 20 records came back within 250 km, all Kansas City.
+  // With it rewritten to 77, only 14 did, and the other six were Attock businesses
+  // 11,808 km away: a nonsensical extent made Google fall back toward whatever the pb
+  // was originally captured for. That is precisely the failure that makes a location
+  // feature look like it works and then harvest the wrong city.
+  const captured = '!1sdentist!4m8!1m3!1d53071.80400987886!2d72.342874!3d33.7609824!7i20';
+  const out = setPbCentre(captured, { lat: 39.0904394, lng: -94.9058341, zoom: 14 });
+  assert.match(out, /!1d53071\.80400987886/, 'the captured extent must survive untouched');
+  assert.match(out, /!2d-94\.9058341/, 'while the centre still moves');
+  assert.match(out, /!3d39\.0904394/);
+});
+
+test('setPbCentre refuses coordinates it cannot use', () => {
+  assert.throws(() => setPbCentre(PB, { lat: null, lng: 74 }), /coordinates/i);
 });
 
 test('googlePayloadSource conforms to the source interface', () => {
@@ -365,4 +383,42 @@ test('every leg exit carries the notices it gathered, including a blocked one', 
   assert.equal(result.stopReason, 'blocked');
   assert.ok(result.notices.some((n) => /cannot be told apart/i.test(n)),
     'a notice must survive an exit that happens later in the leg');
+});
+
+test('setPbQuery replaces the search term the pb was captured with', () => {
+  // The pb opens with !1s<whatever the operator typed into Maps>, and Google reads
+  // it. Leaving it while moving the coordinates harvests a mixture of the two places.
+  const pb = '!1sdentist in Attock!4m8!1m3!1d53071.8!2d72.342874!3d33.7609824!7i20';
+  const out = setPbQuery(pb, 'dental clinic');
+  assert.match(out, /^!1sdental clinic!4m8/);
+  assert.doesNotMatch(out, /Attock/, 'the old search term must be gone entirely');
+});
+
+test('setPbQuery leaves every other pb field untouched', () => {
+  // The coordinates and the page size sit in the same blob, and a greedy replace
+  // would eat them, which would look like a working search returning nothing.
+  const pb = '!1sdentist in Attock!4m8!1m3!1d53071.8!2d72.342874!3d33.7609824!7i20!8i0';
+  const out = setPbQuery(pb, 'gym');
+  assert.match(out, /!2d72\.342874/);
+  assert.match(out, /!3d33\.7609824/);
+  assert.match(out, /!7i20/);
+  assert.match(out, /!8i0/);
+});
+
+test('setPbQuery composes with setPbCentre, which is how a real leg is built', () => {
+  // MEASURED 2026-07-31: a pb captured from "dentist in Attock", re-centred on Kansas
+  // City but with its query left alone, returned only 14 of 20 records anywhere near
+  // Kansas City. The proximity canary stopped the run, correctly, on a search that
+  // was half in Punjab and half in Missouri. Both fields have to move together.
+  const captured = '!1sdentist in Attock!4m8!1m3!1d53071.8!2d72.342874!3d33.7609824!7i20';
+  const leg = setPbQuery(setPbCentre(captured, { lat: 39.0904394, lng: -94.9058341 }), 'dental clinic');
+  assert.match(leg, /!1sdental clinic/);
+  assert.match(leg, /!2d-94\.9058341/);
+  assert.match(leg, /!3d39\.0904394/);
+  assert.doesNotMatch(leg, /Attock/);
+});
+
+test('setPbQuery refuses an empty query rather than blanking the field', () => {
+  assert.throws(() => setPbQuery('!1sx!7i20', ''), /non-empty/i);
+  assert.throws(() => setPbQuery('!1sx!7i20', null), /non-empty/i);
 });

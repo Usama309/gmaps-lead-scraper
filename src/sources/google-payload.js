@@ -21,19 +21,60 @@ export function setPbOffset(pb, offset) {
   return `${pb}!8i${offset}`;
 }
 
-/** Substitute the map centre and zoom into a captured pb blob. */
-export function setPbCentre(pb, { lat, lng, zoom }) {
+/**
+ * Substitute the map centre into a captured pb blob.
+ *
+ * THE VIEWPORT EXTENT AT `!1d` IS DELIBERATELY LEFT ALONE, and that is the whole
+ * point of this comment, because an earlier version rewrote it from the zoom level
+ * with `2 ** (21 - zoom) * 0.6` and the number that produced was simply wrong. At
+ * zoom 14 it yielded 77, against the 53071.8 a real 13z Maps view had captured: out
+ * by a factor of roughly seven hundred.
+ *
+ * Measured on 2026-07-31, harvesting Kansas City from a pb captured in Attock:
+ *
+ *   extent left as captured   20 of 20 records within 250 km, all Kansas City
+ *   extent rewritten to 77    14 of 20, the rest being Attock businesses 11,808 km away
+ *
+ * So a nonsensical extent made Google fall back toward the results the pb was
+ * originally captured for, which is exactly the failure that makes a location feature
+ * look like it works and then harvest the wrong city. The canary's proximity check
+ * caught it, and this is the fix rather than a threshold change.
+ *
+ * Nothing is lost by leaving it. The captured value came from a real Maps view, and
+ * the requested radius is enforced on the RESULTS afterwards, in runHarvest, which is
+ * the only place it can be enforced anyway: Google treats the viewport as a hint.
+ */
+export function setPbCentre(pb, { lat, lng }) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
     throw new Error('setPbCentre requires finite coordinates');
   }
   let out = pb;
   out = /!2d-?[\d.]+/.test(out) ? out.replace(/!2d-?[\d.]+/, `!2d${lng}`) : `${out}!2d${lng}`;
   out = /!3d-?[\d.]+/.test(out) ? out.replace(/!3d-?[\d.]+/, `!3d${lat}`) : `${out}!3d${lat}`;
-  if (Number.isFinite(zoom) && /!1d[\d.]+/.test(out)) {
-    // pb encodes an extent rather than a zoom level; larger value means wider view.
-    out = out.replace(/!1d[\d.]+/, `!1d${Math.round(2 ** (21 - zoom) * 0.6)}`);
-  }
   return out;
+}
+
+/**
+ * Substitute the search term into a captured pb blob.
+ *
+ * The pb opens with `!1s<the query the operator typed into Maps>`, and that text is
+ * NOT decoration: Google reads it. Leaving it alone while moving the coordinates
+ * produced a genuinely mixed result set, measured on 2026-07-31 by capturing a pb
+ * from "dentist in Attock" and then harvesting Kansas City. Only 14 of 20 records
+ * came back anywhere near Kansas City, and the canary's proximity check stopped the
+ * run, correctly, on a search that was half in Punjab and half in Missouri.
+ *
+ * So the pb's query is rewritten to match the leg we are actually running. Without
+ * this, the place picker and the pasted-link feature both look like they work, fill
+ * the form correctly, and then harvest somewhere between where you asked and wherever
+ * you last happened to search.
+ */
+export function setPbQuery(pb, query) {
+  const clean = String(query ?? '').trim();
+  if (!clean) throw new Error('setPbQuery requires a non-empty query');
+  // `!1s` up to the next `!`, which is where the next pb field begins.
+  if (!/!1s[^!]*/.test(pb)) return `!1s${clean}${pb}`;
+  return pb.replace(/!1s[^!]*/, `!1s${clean}`);
 }
 
 /**
